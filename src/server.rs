@@ -3,15 +3,13 @@ use std::{
     time::Duration,
     sync::Arc,
     net::SocketAddr,
-    error::Error,
-    io::ErrorKind,
 };
 use crate::public::{ Operate, Identity, Identity2, IResult };
 use crate::{ println_lined };
 use tokio::{
     self, time,
     sync::{ Mutex, MutexGuard, RwLock, mpsc },
-    net::{ UdpSocket, TcpListener, TcpStream, ToSocketAddrs },
+    net::{ UdpSocket, TcpListener, /*TcpStream, ToSocketAddrs*/ },
     io::{ AsyncWriteExt, AsyncReadExt },
     task::JoinHandle
 };
@@ -27,7 +25,7 @@ struct Room{
 
 struct Bridge{
     waiter:Option<SocketAddr>,
-    waker:(mpsc::Sender<Identity2>,mpsc::Sender<Identity2>)
+    waker:(mpsc::Sender<Identity2>,mpsc::Sender<Identity2>),
     timeout:u8 //超过一定时间后销毁
 }
 
@@ -80,19 +78,9 @@ impl Server{
                         let result=async {
 
 
-                            async fn fail(stream:&mut TcpStream)->IResult<()>{
-
-                                match stream.write(&Operate::OperationFailed.serialize()).await{
-                                    Ok(_)=>Ok(()),
-                                    Err(err)=>Err(err)
-                                }
-
-                            }
-
-
                             macro_rules! fail{
                                 ()=>{
-                                    fail(&mut stream).await?
+                                    stream.write(&Operate::OperationFailed.serialize()).await.and(Ok(()))?
                                 }
                             }
 
@@ -119,18 +107,10 @@ impl Server{
                             }
 
                             let mut buf=[0u8;64];
-                            let len=match time::timeout(
+                            let len=time::timeout(
                                 Duration::from_secs(5), 
                                 stream.read(&mut buf)
-                            ).await{
-                                Ok(n)=>n?,
-                                Err(err)=>{
-                                    return Err(std::io::Error::new(
-                                            ErrorKind::TimedOut,
-                                            anyhow::anyhow!("Timed out when waiting message sending from the TCP stream")
-                                    ));
-                                }
-                            };
+                            ).await??;
 
                             //开始建立通信
                             match Operate::deserialize(&buf[..len]){
@@ -180,8 +160,8 @@ impl Server{
                                             //有玩家连接
                                             opt=rx.recv()=>{
 
-                                                let (cid1,cid2,tx:tx1)=opt.unwrap();
-                                                let bridges_lock=bridges.lock().await;
+                                                let (cid1,cid2,tx1)=opt.unwrap();
+                                                let mut bridges_lock=bridges.lock().await;
                                                 bridges_lock.insert(cid1,Bridge::new(tx1.clone(),ok_tx.clone()));
                                                 bridges_lock.insert(cid2,Bridge::new(tx1,ok_tx.clone()));
                                                 stream.write(&Operate::ConnectToMe(cid1,cid2).serialize()).await?;
@@ -190,7 +170,7 @@ impl Server{
 
                                             //已完成一个连接
                                             id2=ok_rx.recv()=>{
-                                                stream.write(&Operate::Bridged(id2)).await?;
+                                                stream.write(&Operate::Bridged(id2.unwrap()).serialize()).await?;
                                             },
 
                                             //房主有动作
@@ -225,15 +205,15 @@ impl Server{
 
                                         Some(room)=>{
 
-                                            let mut bridges_lock=bridges.lock().await;
+                                            let bridges_lock=bridges.lock().await;
                                             let mut bridge_counter_lock=bridge_counter.lock().await;
                                             let cid1=find_id(&mut bridge_counter_lock,&bridges_lock);
                                             let cid2=find_id(&mut bridge_counter_lock,&bridges_lock);
                                             let (tx,mut rx)=mpsc::channel::<Identity2>(2);
                                             room.tx.send((cid1,cid2,tx)).await.unwrap(); //把连接信息发给房主
                                             stream.write(&Operate::ConnectToMe(cid1,cid2).serialize()).await?;
-                                            stream.write(&Operate::Bridged(rx.recv().await.unwrap())).await?; //写入成功桥接的管道
-                                            stream.write(&Operate::Bridged(rx.recv().await.unwrap())).await?; //总共两个
+                                            stream.write(&Operate::Bridged(rx.recv().await.unwrap()).serialize()).await?; //写入成功桥接的管道
+                                            stream.write(&Operate::Bridged(rx.recv().await.unwrap()).serialize()).await?; //总共两个
 
                                         },
 
@@ -313,9 +293,9 @@ impl Server{
                                                         //成功桥接
                                                         Some(ref _raddr)=>{
                                                             if *_raddr==addr { return; }
+                                                            bri.waker.0.send(cid);
+                                                            bri.waker.1.send(cid);
                                                             let raddr=bridges_lock.remove(&cid).unwrap().waiter.unwrap();
-                                                            socket.send_to(&Operate::Bridged.serialize(),&raddr).await.unwrap();
-                                                            socket.send_to(&Operate::Bridged.serialize(),&addr).await.unwrap();
                                                             let mut table_lock=table.write().await;
                                                             table_lock.insert(addr.clone(),raddr.clone());
                                                             table_lock.insert(raddr,addr);

@@ -1,9 +1,8 @@
 use std::convert::TryFrom;
 use std::net::SocketAddr;
-use std::time::Duration;
+//use std::time::Duration;
 #[macro_use]
 extern crate lazy_static;
-
 #[macro_use]
 extern crate clap;
 
@@ -14,7 +13,11 @@ mod server;
 
 #[tokio::main]
 async fn main() {
-    /*let srv = SocketAddr::new([123, 207, 9, 213]/*[127,0,0,1]*/.into(), 27979);
+    let srv = SocketAddr::new(
+        [123, 207, 9, 213] /*[127,0,0,1]*/
+            .into(),
+        27979,
+    );
     let matches = clap_app!(
         MCMU=>
         (version:"1.0")
@@ -75,10 +78,9 @@ async fn main() {
 
     if let Err(err) = result {
         println!("错误：{}", err);
-    };*/
+    };
 
-    
-    println!("Hello, world!");
+    /*println!("Hello, world!");
     let addr:SocketAddr="127.0.0.1:12233".parse().unwrap();
     let srv=tokio::spawn(server::Server::run(addr.clone()));
 
@@ -92,5 +94,5 @@ async fn main() {
         Err(err)=>{
             println!("main error: {}",err);
         }
-    }
+    }*/
 }
