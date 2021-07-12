@@ -1,15 +1,16 @@
 use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
+    convert::TryInto,
     //collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Weak},
     time::Duration,
 };
-use tokio::{net::UdpSocket, sync::oneshot};
+use tokio::{net::UdpSocket, task::JoinHandle};
 
 pub type Identity = u32;
-pub type Identity2 = Identity;
+pub type Identity2 = u32;
 pub type IResult<T> = Result<T, anyhow::Error>;
 
 #[macro_export]
@@ -17,14 +18,6 @@ macro_rules! println_lined{
     ($($tt:tt)*)=>{
         println!("[{}:{}] {}",file!(),line!(),format!($($tt)*));
     }
-}
-
-pub enum ProxyProto<'a> {
-    Connect(Identity2),
-    Connected,
-    Info(&'a [u8]),
-    Disconnect,
-    Disconnected,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -39,6 +32,12 @@ pub enum Operate {
     HeartBeat,
 }
 
+pub enum CommunicatePacket {
+    Connect = 0,
+    Data = 1,
+    HeartBeat = 2,
+}
+
 pub struct MCPEInfo<'a> {
     splits: Vec<&'a [u8]>,
     pub world_name: String,
@@ -47,9 +46,9 @@ pub struct MCPEInfo<'a> {
 
 pub struct BridgeClient {
     udp: Weak<UdpSocket>,
-    waiting: Option<oneshot::Sender<()>>,
     saddr: SocketAddr,
     baddr: SocketAddr,
+    gc: JoinHandle<()>,
 }
 
 impl Operate {
@@ -126,100 +125,85 @@ impl BridgeClient {
         saddr: SocketAddr, //服务器的地址
         baddr: SocketAddr, //绑定的地址
         name: &'static str,
-        pack_sender: JoinHandle<()>,
     ) -> IResult<Self> {
         let udp = Arc::new(UdpSocket::bind(baddr).await?);
-        let (wake_sender, wake_receiver) = oneshot::channel::<()>();
 
-        {
-            let packet = Operate::BridgeTo(cid).serialize();
+        let packet = {
+            let mut packet = [0u8; 5];
+            packet[0] = CommunicatePacket::Connect as u8;
+            std::mem::replace(&mut packet[1..5].try_into().unwrap(), cid.to_be_bytes());
+            packet
+        };
+
+        //间隔发包
+        let pinger = {
             let udp = udp.clone();
-
-            let jh = tokio::spawn(async move {
-                match {
-                    tokio::select! {
-                        //持续发包
-                        result=async {
-                            loop {
-                                udp.send_to(&packet,&saddr).await?;
-                                println_lined!("已发包");
-                                tokio::time::sleep(Duration::from_secs(1));
-                            }
-                        }=>{ unreachable!() },
-
-                        //连接成功
-                        _=async {
-                            wake_receiver.await.unwrap();
-                        }=>{ Ok(()) }
+            tokio::spawn(async move {
+                loop {
+                    if let Err(err) = udp.send_to(&packet, &saddr).await {
+                        println_lined!("Unexpected error:{}", err);
+                        continue;
                     }
-                } {
-                    Ok(_) => {
-                        println!("`{}` connected", name);
-                    }
+                    println_lined!("已发包");
+                    tokio::time::sleep(Duration::from_millis(500));
+                }
+            })
+        };
 
-                    Err(err) => {
-                        println_lined!("`{}` connect failed: {}", name, err);
+        //监听是否连接成功
+        {
+            let udp = udp.clone();
+            let saddr = saddr.clone();
+            let result = tokio::time::timeout(Duration::from_secs(10), async move {
+                let mut buf = [0u8; 5];
+                loop {
+                    let (len, raddr) = udp.recv_from(&mut buf).await?;
+                    if raddr == saddr && buf[..len] == packet {
+                        break IResult::Ok(());
                     }
                 }
-            });
+            })
+            .await;
+            pinger.abort();
+            result??;
         }
-
-        return Ok(BridgeClient {
-            udp: Arc::downgrade(&udp),
-            waiting: Some(wake_sender),
-            baddr: udp.local_addr().unwrap(),
-            saddr,
-            pack_sender: jh,
-        });
-    }
-
-    pub fn connected(&mut self) -> IResult<()> {
-        match self.waiting {
-            Some(tx) => {
-                tx.send(());
-                self.waiting = None;
-            }
-
-            None => {
-                panic!("Connection has been established, cannot confirm the connection twice");
-            }
-        }
-
-        //获取UDP套接字
-        let udp = match self.udp.clone().upgrade() {
-            Some(a) => a,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Cannot establish the connection because the udp socket has dropped"
-                ));
-            }
-        };
-        let saddr = self.saddr.clone();
 
         //垃圾清理运行时
-        tokio::spawn(async move {
-            let mut static_time = 0u8;
-            loop {
-                //心跳检查 break后udp被析构
-                tokio::time::sleep(Duration::from_secs(4)).await;
-                static_time += 4;
+        let gc = {
+            let udp = udp.clone();
+            tokio::spawn(async move {
+                let mut static_time = 0u8;
+                let mut interval = tokio::time::interval(Duration::from_secs(4));
+                loop {
+                    //心跳检查 break后udp被析构
+                    interval.tick().await;
+                    static_time += 4;
 
-                //当10s内处于静止状态后，开始主动发包测试
-                if static_time > 10 {
-                    if let Err(_) = udp.send_to(&[], saddr).await {
+                    //当10s内处于静止状态后，开始主动发包测试
+                    if static_time > 10 {
+                        if let Err(_) = udp
+                            .send_to(&[CommunicatePacket::HeartBeat as u8], saddr)
+                            .await
+                        {
+                            break;
+                        }
+                    }
+
+                    //大于20s，销毁
+                    if static_time > 20 {
+                        println!("回收");
                         break;
                     }
                 }
+            })
+        };
 
-                //大于20s，销毁
-                if static_time > 20 {
-                    println!("回收");
-                    break;
-                }
-            }
-        });
-
-        Ok(())
+        Ok(BridgeClient {
+            udp: Arc::downgrade(&udp),
+            saddr,
+            baddr: udp.local_addr()?,
+            gc,
+        })
     }
 
     pub async fn recv_from(&self, b: &mut [u8]) -> Option<(usize, SocketAddr)> {
@@ -249,11 +233,6 @@ impl BridgeClient {
         &self.baddr
     }
 
-    #[inline]
-    pub fn is_connected(&self) -> bool {
-        self.waiting.is_none()
-    }
-
     /*pub async fn transpond_from(&self,from:&SocketAddr,b:&[u8])->Option<()>{
     if *from==self.saddr{
     self.send_to(b,&self.laddr).await?;
@@ -266,6 +245,6 @@ impl BridgeClient {
 
 impl Drop for BridgeClient {
     fn drop(&mut self) {
-        self.pack_sender.abort();
+        self.gc.abort();
     }
 }
