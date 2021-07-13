@@ -1,8 +1,9 @@
 use crate::println_lined;
-use crate::public::{IResult, Identity, Identity2, Operate};
+use crate::public::{CommunicatePacket, IResult, Identity, Identity2, Operate};
 use rand::{random, Rng};
 use std::{
     collections::HashMap,
+    convert::TryInto,
     net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicU32, Ordering},
@@ -26,17 +27,51 @@ struct Room {
 }
 
 struct Bridge {
-    waiter: Option<SocketAddr>,
-    expected_ip: (IpAddr, IpAddr),
+    peer1: BridgePeer,
+    peer2: BridgePeer,
     timeout: u8, //超过一定时间后销毁
+}
+
+enum BridgePeer {
+    Empty(IpAddr),
+    Ready(SocketAddr),
 }
 
 impl Bridge {
     fn new(ip1: IpAddr, ip2: IpAddr) -> Self {
         Bridge {
-            waiter: None,
-            expected_ip: (ip1, ip2),
+            peer1: BridgePeer::Empty(ip1),
+            peer2: BridgePeer::Empty(ip2),
             timeout: 0,
+        }
+    }
+
+    fn upgrade(&mut self, addr: SocketAddr) -> IResult<()> {
+        if let BridgePeer::Empty(ref ip) = self.peer1 {
+            if *ip == addr.ip() {
+                self.peer1 = BridgePeer::Ready(addr);
+                return Ok(());
+            }
+        }
+
+        if let BridgePeer::Empty(ref ip) = self.peer2 {
+            if *ip == addr.ip() {
+                self.peer2 = BridgePeer::Ready(addr);
+                return Ok(());
+            }
+        }
+
+        Err(anyhow::anyhow!("Cannot upgrade the bridge"))
+    }
+
+    fn connected(&self) -> bool {
+        matches!(self.peer1, BridgePeer::Ready(_)) && matches!(self.peer2, BridgePeer::Ready(_))
+    }
+
+    fn finish(self) -> (SocketAddr, SocketAddr) {
+        match (self.peer1, self.peer2) {
+            (BridgePeer::Ready(a1), BridgePeer::Ready(a2)) => (a1, a2),
+            _ => panic!("Cannot finish a bridge that has not been connected!"),
         }
     }
 }
@@ -227,61 +262,52 @@ impl Server {
                 let bridges = Arc::clone(&bridges);
                 let table = Arc::clone(&table);
 
-                tokio::spawn(async move {
+                let _: JoinHandle<IResult<()>> = tokio::spawn(async move {
                     let mut buf = [0u8; 1472]; //UDP最大安全大小
                     loop {
-                        match socket.recv_from(&mut buf).await {
-                            Ok((len, addr)) => match table.read().await.get(&addr) {
-                                Some(raddr) => {
-                                    if len == 0 {
-                                        continue;
-                                    }
-                                    socket.send_to(&buf[..len], raddr).await.unwrap();
-                                }
+                        let (len, addr) = socket.recv_from(&mut buf).await?;
+                        match table.read().await.get(&addr) {
+                            //转发
+                            Some(raddr) => {
+                                socket.send_to(&buf[..len], raddr).await.unwrap();
+                            }
 
-                                //桥接
-                                None => {
-                                    match Operate::deserialize(&buf[..len]) {
-                                        Some(Operate::BridgeTo(cid)) => {
-                                            let mut bridges_lock = bridges.lock().await;
-                                            if let Some(bri) = bridges_lock.get_mut(&cid) {
-                                                match bri.waiter {
-                                                    //成功桥接
-                                                    Some(ref _raddr) => {
-                                                        if *_raddr == addr {
-                                                            return;
-                                                        }
-                                                        let raddr = bridges_lock
-                                                            .remove(&cid)
-                                                            .unwrap()
-                                                            .waiter
-                                                            .unwrap();
-                                                        let mut table_lock = table.write().await;
-                                                        table_lock
-                                                            .insert(addr.clone(), raddr.clone());
-                                                        table_lock.insert(raddr, addr);
-                                                        println!("成功桥接");
-                                                    }
-
-                                                    //有一端连接，等待另一端
-                                                    None => {
-                                                        bri.waiter = Some(addr);
-                                                    }
-                                                }
+                            //桥接
+                            None => {
+                                match buf[0] {
+                                    CommunicatePacket::CONNECT if len == 5 => {
+                                        let mut bridges_lock = bridges.lock().await;
+                                        let cid = u32::from_be_bytes(buf[1..5].try_into().unwrap());
+                                        if let Some(bri) = bridges_lock.get_mut(&cid) {
+                                            //地址不对应
+                                            if let Err(err) = bri.upgrade(addr) {
+                                                println_lined!("{}", err);
+                                                continue;
                                             }
-                                        }
 
-                                        _ => {
-                                            println_lined!("???");
+                                            if !bri.connected() {
+                                                continue;
+                                            }
+
+                                            let (a1, a2) =
+                                                bridges_lock.remove(&cid).unwrap().finish();
+
+                                            let mut table_lock = table.write().await;
+                                            table_lock.insert(a1.clone(), a2.clone());
+                                            table_lock.insert(a1, a2);
+                                            println!("成功桥接");
                                         }
                                     }
-                                }
-                            },
 
-                            Err(err) => println!("The server cannot receive a packet: {}", err),
+                                    _ => {
+                                        println_lined!("???");
+                                    }
+                                }
+                            }
                         }
                     }
-                })
+                    //return IResult::Ok(());
+                });
             });
         };
 

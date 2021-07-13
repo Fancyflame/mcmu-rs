@@ -32,11 +32,7 @@ pub enum Operate {
     HeartBeat,
 }
 
-pub enum CommunicatePacket {
-    Connect = 0,
-    Data = 1,
-    HeartBeat = 2,
-}
+pub struct CommunicatePacket;
 
 pub struct MCPEInfo<'a> {
     splits: Vec<&'a [u8]>,
@@ -49,6 +45,12 @@ pub struct BridgeClient {
     saddr: SocketAddr,
     baddr: SocketAddr,
     gc: JoinHandle<()>,
+}
+
+impl CommunicatePacket {
+    pub const CONNECT: u8 = 0;
+    pub const DATA: u8 = 1;
+    pub const HEARTBEAT: u8 = 2;
 }
 
 impl Operate {
@@ -130,7 +132,7 @@ impl BridgeClient {
 
         let packet = {
             let mut packet = [0u8; 5];
-            packet[0] = CommunicatePacket::Connect as u8;
+            packet[0] = CommunicatePacket::CONNECT;
             std::mem::replace(&mut packet[1..5].try_into().unwrap(), cid.to_be_bytes());
             packet
         };
@@ -171,6 +173,7 @@ impl BridgeClient {
         //垃圾清理运行时
         let gc = {
             let udp = udp.clone();
+            let saddr = saddr.clone();
             tokio::spawn(async move {
                 let mut static_time = 0u8;
                 let mut interval = tokio::time::interval(Duration::from_secs(4));
@@ -179,14 +182,9 @@ impl BridgeClient {
                     interval.tick().await;
                     static_time += 4;
 
-                    //当10s内处于静止状态后，开始主动发包测试
-                    if static_time > 10 {
-                        if let Err(_) = udp
-                            .send_to(&[CommunicatePacket::HeartBeat as u8], saddr)
-                            .await
-                        {
-                            break;
-                        }
+                    if let Err(err) = udp.send_to(&[CommunicatePacket::HEARTBEAT], &saddr).await {
+                        println_lined!("Unexpected error: {}", err);
+                        break;
                     }
 
                     //大于20s，销毁
