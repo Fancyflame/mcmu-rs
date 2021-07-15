@@ -1,12 +1,13 @@
 use crate::println_lined;
-use crate::public::{CommunicatePacket, IResult, Identity, Identity2, Operate};
+use crate::public::{log_i_result, CommunicatePacket, IResult, Identity, Identity2, Operate};
 use rand::{random, Rng};
 use std::{
     collections::HashMap,
     convert::TryInto,
+    //io::Write,
     net::{IpAddr, SocketAddr},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -23,7 +24,8 @@ use tokio::{
 pub struct Server;
 
 struct Room {
-    tx: mpsc::Sender<(Identity2, Identity2, IpAddr)>, //pwd:
+    tx: mpsc::Sender<(Identity2, Identity2, IpAddr)>, //两个管道的id，连接者的ip地址
+                                                      //pwd:Option<[u8;32]>
 }
 
 struct Bridge {
@@ -81,7 +83,9 @@ impl Server {
         let bridge_counter = Arc::new(AtomicU32::new(random()));
         let bridges = Arc::new(Mutex::new(HashMap::<Identity2, Bridge>::new()));
         //转发表
-        let table = Arc::new(RwLock::new(HashMap::<SocketAddr, SocketAddr>::new()));
+        let table = Arc::new(RwLock::new(
+            HashMap::<SocketAddr, (SocketAddr, Arc<AtomicU8>, bool)>::new(), //这里的bool应该为常量，防止在垃圾检测时被重复加时
+        ));
 
         //构建连接的通信服务器
         let connecter: JoinHandle<IResult<()>> = {
@@ -116,14 +120,11 @@ impl Server {
                             //开始建立通信
                             match Operate::deserialize(&buf[..len]){
 
-
                                 //开服
                                 Some(Operate::Open)=>{
 
 
                                     let mut rooms_lock=rooms.write().await;
-                                    //当一个连接成功后从这里发回信息
-                                    let (ok_tx,mut ok_rx)=mpsc::channel::<Identity2>(4);
 
                                     //已经没位置了
                                     if rooms_lock.len()>=0xffffffff{
@@ -131,21 +132,21 @@ impl Server {
                                     }
 
                                     //寻找可用的id
-                                    let room_id=loop{
-                                        let id=rand::thread_rng().gen_range(0..1000000);
+                                    let room_id=123456;/*loop{
+                                        let id=rand::thread_rng().gen_range(0..10000000);
                                         if !rooms_lock.contains_key(&id){
                                             break id;
                                         }
-                                    };
+                                    };*/
 
                                     //已开服
                                     let (tx,mut rx)=mpsc::channel(3);
+                                    println!("有房间建立：{:07}",room_id);
                                     stream.write(&Operate::Opened(room_id).serialize()).await?;
                                     rooms_lock.insert(room_id,Room{ tx });
-                                    //drop(rooms_lock);
+                                    drop(rooms_lock);
 
 
-                                    //Runtime
                                     loop{
 
 
@@ -163,17 +164,13 @@ impl Server {
 
                                             },
 
-                                            //已完成一个连接
-                                            id2=ok_rx.recv()=>{
-                                                stream.write(&Operate::Bridged(id2.unwrap()).serialize()).await?;
-                                            },
-
                                             //房主有动作
                                             result=stream.read(&mut buf)=>match result{
 
                                                 //关闭房间
                                                 Err(_) | Ok(0)=>{
                                                     rooms.write().await.remove(&room_id);
+                                                    println!("房间已关闭：{:07}",room_id);
                                                     break;
                                                 },
 
@@ -257,82 +254,126 @@ impl Server {
             let bridges = Arc::clone(&bridges);
             let table = Arc::clone(&table);
 
-            tokio::spawn(async move {
+            {
                 let socket = Arc::clone(&socket);
                 let bridges = Arc::clone(&bridges);
                 let table = Arc::clone(&table);
 
-                let _: JoinHandle<IResult<()>> = tokio::spawn(async move {
-                    let mut buf = [0u8; 1472]; //UDP最大安全大小
-                    loop {
-                        let (len, addr) = socket.recv_from(&mut buf).await?;
-                        match table.read().await.get(&addr) {
-                            //转发
-                            Some(raddr) => {
-                                socket.send_to(&buf[..len], raddr).await.unwrap();
-                            }
-
-                            //桥接
-                            None => {
-                                match buf[0] {
-                                    CommunicatePacket::CONNECT if len == 5 => {
-                                        let mut bridges_lock = bridges.lock().await;
-                                        let cid = u32::from_be_bytes(buf[1..5].try_into().unwrap());
-                                        if let Some(bri) = bridges_lock.get_mut(&cid) {
-                                            //地址不对应
-                                            if let Err(err) = bri.upgrade(addr) {
-                                                println_lined!("{}", err);
-                                                continue;
-                                            }
-
-                                            if !bri.connected() {
-                                                continue;
-                                            }
-
-                                            let (a1, a2) =
-                                                bridges_lock.remove(&cid).unwrap().finish();
-
-                                            let mut table_lock = table.write().await;
-                                            table_lock.insert(a1.clone(), a2.clone());
-                                            table_lock.insert(a1, a2);
-                                            println!("成功桥接");
+                let _: JoinHandle<IResult<()>> =
+                    tokio::spawn(log_i_result("UDP转发", async move {
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            let (len, addr) = socket.recv_from(&mut buf).await?;
+                            let table_read = table.read().await;
+                            match table_read.get(&addr) {
+                                //转发
+                                Some((raddr, arc, _)) => {
+                                    arc.store(0, Ordering::Relaxed);
+                                    match buf[0] {
+                                        CommunicatePacket::DATA => {
+                                            socket.send_to(&buf[..len], raddr).await.unwrap();
+                                        }
+                                        CommunicatePacket::HEARTBEAT => {}
+                                        CommunicatePacket::CONNECT => {
+                                            socket.send_to(&buf[..len], addr).await.unwrap();
+                                        }
+                                        _ => {
+                                            println_lined!("Malformed packet. Ignored.");
                                         }
                                     }
+                                }
 
-                                    _ => {
-                                        println_lined!("???");
+                                //桥接
+                                None => {
+                                    drop(table_read);
+                                    match buf[0] {
+                                        CommunicatePacket::CONNECT if len == 5 => {
+                                            let mut bridges_lock = bridges.lock().await;
+                                            let cid = Identity2::from_be_bytes(
+                                                buf[1..5].try_into().unwrap(),
+                                            );
+                                            if let Some(bri) = bridges_lock.get_mut(&cid) {
+                                                //地址不对应
+                                                if let Err(err) = bri.upgrade(addr) {
+                                                    println_lined!("{}", err);
+                                                    continue;
+                                                }
+
+                                                if !bri.connected() {
+                                                    continue;
+                                                }
+
+                                                let (a1, a2) =
+                                                    bridges_lock.remove(&cid).unwrap().finish();
+                                                let arc = Arc::new(AtomicU8::new(0));
+
+                                                socket.send_to(&buf[..len], &a1).await.unwrap();
+                                                socket.send_to(&buf[..len], &a2).await.unwrap();
+                                                println!("正在桥接");
+
+                                                let mut table_lock = table.write().await;
+                                                dbg!("wow");
+                                                table_lock.insert(
+                                                    a1.clone(),
+                                                    (a2.clone(), arc.clone(), true),
+                                                );
+                                                table_lock.insert(a2, (a1, arc, false));
+
+                                                println!("成功桥接");
+                                            }
+                                        }
+
+                                        _ => {
+                                            println_lined!("???");
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    //return IResult::Ok(());
-                });
-            });
+                        //return IResult::Ok(());
+                    }));
+            };
         };
 
         let _garbage_collecter = {
-            let bridges = Arc::clone(&bridges);
+            let bridges = bridges.clone();
+            let table = table.clone();
 
             tokio::spawn(async move {
                 let mut interval = time::interval(Duration::from_secs(5));
                 loop {
                     interval.tick().await;
+
+                    //先清理未连接的
                     let mut bridges_lock = bridges.lock().await;
                     bridges_lock.retain(|_, v| {
                         v.timeout += 5;
-                        v.timeout <= 15
+                        v.timeout < 15
+                    });
+
+                    //再清理死亡的
+                    let mut table_lock = table.write().await;
+                    table_lock.retain(|_, v| {
+                        let mut val = v.1.load(Ordering::Relaxed);
+                        if v.2 {
+                            //避免重复加时
+                            val += 5;
+                            v.1.store(val, Ordering::Relaxed);
+                        }
+                        val < 15
                     });
                 }
             })
         };
 
-        tokio::try_join!(
-            connecter,
-            //transponder,
-            //garbage_collecter
-        )
-        .unwrap();
+        drop(
+            tokio::try_join!(
+                connecter,
+                //transponder,
+                //garbage_collecter
+            )
+            .unwrap(),
+        );
         Ok(())
     }
 }

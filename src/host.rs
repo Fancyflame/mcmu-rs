@@ -1,10 +1,15 @@
 use crate::println_lined;
-use crate::public::{BridgeClient, IResult, Identity2, MCPEInfo, Operate};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use crate::public::{log_i_result, BridgeClient, IResult, MCPEInfo, Operate};
+use std::{
+    net::SocketAddr,
+    sync::{atomic::AtomicU16, Arc},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{oneshot, Mutex},
+    task::JoinHandle,
     time,
 };
 
@@ -160,8 +165,7 @@ impl Host {
 
             Some(Operate::Opened(room_id))=>{
 
-                println!("连接成功。房间号{}",hex::encode(room_id.to_le_bytes()));
-                let waiter=Arc::new(Mutex::new(HashMap::<Identity2,oneshot::Sender<()>>::with_capacity(6)));
+                println!("连接成功。房间号{:07}",room_id);
                 let mut interval=time::interval(Duration::from_secs(10));
                 loop{
 
@@ -180,38 +184,68 @@ impl Host {
 
                                 //有连接
                                 Some(Operate::ConnectToMe(cid1,cid2))=>{
+                                    let (tx,rx)=oneshot::channel::<u16>();
+                                    let mut tx_option=Some(tx);
 
-                                    let waiter=waiter.clone();
-                                    tokio::spawn(async move{
+                                    //信息管道
+                                    let info=tokio::spawn(log_i_result("房主信息管道", async move{
 
-                                        let info_pipe=BridgeClient::connect(
-                                            cid1,
-                                            saddr.clone(),
-                                            SocketAddr::new([0,0,0,0].into(), 0),
-                                            "info"
-                                        ).await?;
-                                        let (tx1,rx1)=oneshot::channel();
-                                        waiter.lock().await.insert(cid1, tx1);
-                                        tokio::select!{
-                                            tokio::time::sleep(Duration::from_secs())
+                                        let info_pipe=BridgeClient::connect(cid1, saddr.clone(), SocketAddr::new([0,0,0,0].into(), 0), "房主信息管道").await?;
+                                        let laddr=SocketAddr::new([127,0,0,1].into(), 19132);
+                                        let mut buf=[0u8;1024];
+                                        loop{
+                                            let (len,raddr)=info_pipe.recv_from(&mut buf).await?;
+
+                                            if raddr==laddr{
+                                                //从本地发来
+                                                if tx_option.is_some(){
+                                                    //还没有发送过端口号
+                                                    let info = match MCPEInfo::deserialize(&buf[..len]) {
+                                                        Some(v) => v,
+                                                        None => {
+                                                            println_lined!("The protocol is malformed");
+                                                            continue;
+                                                        }
+                                                    };
+                                                    std::mem::replace(&mut tx_option, None)
+                                                        .unwrap()
+                                                        .send(info.game_port).unwrap();
+                                                }
+                                                drop(info_pipe.send_to(&buf[..len],&saddr).await);
+                                            }else if raddr==saddr{
+                                                //从玩家发来
+                                                info_pipe.send_to(&buf[..len],&laddr).await?;
+                                            }else{
+                                                println_lined!("Received a packet from unknown remote address: {}. Ignored.",raddr);
+                                            }
                                         }
 
-                                        IResult::Ok(())
+                                    }));
 
-                                    });
+                                    //游戏管道
+                                    let game=tokio::spawn(log_i_result("房主游戏管道",async move{
+                                        let game_pipe=BridgeClient::connect(cid2, saddr.clone(), SocketAddr::new([0,0,0,0].into(), 0), "房主游戏管道").await?;
+                                        let laddr=SocketAddr::new([127,0,0,1].into(), rx.await?);
+                                        let mut buf=[0u8;1024];
+                                        loop{
+                                            let (len,raddr)=game_pipe.recv_from(&mut buf).await?;
+                                            if raddr==laddr{
+                                                //从本地发来
+                                                game_pipe.send_to(&buf[..len],&saddr).await?;
+                                            }else if raddr==saddr{
+                                                //从玩家发来
+                                                game_pipe.send_to(&buf[..len],&laddr).await?;
+                                            }
+                                        }
+                                    }));
+
+                                    dbg!(tokio::try_join!(info,game));
 
                                 }
 
-                                //已连接的管道
-                                Some(Operate::Bridged(cid))=>{
-                                    match waiter.lock().await.remove(&cid){
-                                        Some(o)=>{
-                                            o.send(());
-                                        }
-                                        None=>{
-                                            println_lined!("A `Bridged` packet sent from the server doesn't match any connections. Ignored.");
-                                        }
-                                    }
+                                _=>{
+                                    println_lined!("Received an Unexpected packet from the server. Ignored.");
+                                    stream.write(&Operate::OperationFailed.serialize()).await?;
                                 }
 
                             }

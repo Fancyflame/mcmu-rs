@@ -1,10 +1,12 @@
 use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
-    convert::TryInto,
-    //collections::HashMap,
+    io::Write,
     net::SocketAddr,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+        Arc, Weak,
+    },
     time::Duration,
 };
 use tokio::{net::UdpSocket, task::JoinHandle};
@@ -27,7 +29,7 @@ pub enum Operate {
     HelloTo(Identity),
     ConnectToMe(Identity2, Identity2), //第一个是信息管道，第二个是游戏管道
     BridgeTo(Identity2),
-    Bridged(Identity2),
+    //Bridged(Identity2),
     OperationFailed,
     HeartBeat,
 }
@@ -44,13 +46,21 @@ pub struct BridgeClient {
     udp: Weak<UdpSocket>,
     saddr: SocketAddr,
     baddr: SocketAddr,
-    gc: JoinHandle<()>,
+    runtime: JoinHandle<IResult<()>>,
+}
+
+struct RingBuffer {
+    buffer: Box<[u8]>,
+    start: AtomicUsize,
+    end: AtomicUsize,
 }
 
 impl CommunicatePacket {
     pub const CONNECT: u8 = 0;
-    pub const DATA: u8 = 1;
-    pub const HEARTBEAT: u8 = 2;
+    //pub const ACK: u8 = 1;
+    pub const DATA: u8 = 2;
+    pub const HEARTBEAT: u8 = 3;
+    //pub const RESET: u8 = 4;
 }
 
 impl Operate {
@@ -68,6 +78,86 @@ impl Operate {
     #[inline]
     pub fn serialize(&self) -> Vec<u8> {
         bincode::serialize(self).unwrap()
+    }
+}
+
+impl RingBuffer {
+    fn new(buf_size: usize) -> Self {
+        Self::with_capacity(0)
+    }
+
+    fn with_capacity(buf_size: usize) -> Self {
+        RingBuffer {
+            buffer: vec![0u8; buf_size].into_boxed_slice(),
+            start: AtomicUsize::new(0),
+            end: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn get_bound(&self) -> (usize, usize) {
+        (
+            self.start.load(Ordering::Relaxed),
+            self.end.load(Ordering::Relaxed),
+        )
+    }
+
+    fn write_exact(&self, buf: &[u8]) -> usize {
+        let (start, mut end) = self.get_bound();
+        //安全：已经保证不会写到读区域
+        //强制将不可变引用改成可变引用
+        let buffer = unsafe {
+            (&*self.buffer as *const [u8] as *mut [u8])
+                .as_mut()
+                .unwrap()
+        };
+        if start < end {
+            //数据没分片，那么空区就要分片
+            let size = (&mut buffer[end..]).write(buf).unwrap();
+            if size < buf.len() {
+                //数据还没塞完
+                let len = (&mut buffer[..start]).write(&buf[size..]).unwrap();
+                self.end.store(len, Ordering::Relaxed);
+                size + len
+            } else {
+                //一个空区塞得下
+                self.end.store(end + size, Ordering::Relaxed);
+                size
+            }
+        } else {
+            //数据分片，空区就无需分片
+            let size = (&mut buffer[end..start]).write(buf).unwrap();
+            self.end.store(end + size, Ordering::Relaxed);
+            size
+        }
+    }
+
+    fn read_exact(&self, buf: &mut [u8]) -> Option<usize> {
+        let (mut start, end) = self.get_bound();
+        if start <= end {
+            //数据没有断开
+            let read = (&mut buf[..]).write(&self.buffer[start..end]).unwrap();
+            self.start.store(start + read, Ordering::Relaxed);
+            Some(read)
+        } else {
+            //数据断开了
+            let r1 = (&mut buf[..]).write(&self.buffer[start..]).unwrap();
+            start += r1;
+            let r2 = (&mut buf[r1..]).write(&self.buffer[..end]).unwrap();
+            start += r2;
+
+            self.start.store(start, Ordering::Relaxed);
+            Some(r1 + r2)
+        }
+    }
+
+    fn free_cap(&self) -> usize {
+        let (start, end) = self.get_bound();
+        if start < end {
+            self.buffer.len() - (end - start)
+        } else {
+            start - end
+        }
     }
 }
 
@@ -133,7 +223,7 @@ impl BridgeClient {
         let packet = {
             let mut packet = [0u8; 5];
             packet[0] = CommunicatePacket::CONNECT;
-            std::mem::replace(&mut packet[1..5].try_into().unwrap(), cid.to_be_bytes());
+            (&mut packet[1..5]).write(&cid.to_be_bytes()).unwrap();
             packet
         };
 
@@ -146,8 +236,8 @@ impl BridgeClient {
                         println_lined!("Unexpected error:{}", err);
                         continue;
                     }
-                    println_lined!("已发包");
-                    tokio::time::sleep(Duration::from_millis(500));
+                    println_lined!("{}已发包: {}", name, cid);
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
                 }
             })
         };
@@ -162,36 +252,51 @@ impl BridgeClient {
                     let (len, raddr) = udp.recv_from(&mut buf).await?;
                     if raddr == saddr && buf[..len] == packet {
                         break IResult::Ok(());
+                    } else {
+                        println!("检验错误");
                     }
                 }
             })
             .await;
             pinger.abort();
-            result??;
+            match result {
+                Ok(n) => {
+                    n?;
+                }
+                Err(_) => {
+                    Err(anyhow::anyhow!(
+                        "No response from the server after 10s. Abort."
+                    ))?;
+                }
+            }
         }
 
-        //垃圾清理运行时
-        let gc = {
+        println!("`{}`连接成功", name);
+
+        let static_time = Arc::new(AtomicU8::new(0));
+        //启动心跳包运行时和垃圾清理运行时
+        let runtime: JoinHandle<IResult<()>> = {
             let udp = udp.clone();
+            let static_time = static_time.clone();
             let saddr = saddr.clone();
             tokio::spawn(async move {
-                let mut static_time = 0u8;
-                let mut interval = tokio::time::interval(Duration::from_secs(4));
+                let packet = [CommunicatePacket::HEARTBEAT];
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
                 loop {
-                    //心跳检查 break后udp被析构
                     interval.tick().await;
-                    static_time += 4;
+                    let time = static_time.load(Ordering::Relaxed) + 1;
 
-                    if let Err(err) = udp.send_to(&[CommunicatePacket::HEARTBEAT], &saddr).await {
-                        println_lined!("Unexpected error: {}", err);
-                        break;
+                    //静止时间大于7s开始发送心跳包
+                    if time > 7 {
+                        udp.send_to(&packet, &saddr).await?;
                     }
 
-                    //大于20s，销毁
-                    if static_time > 20 {
-                        println!("回收");
-                        break;
+                    //静止时间大于15s销毁（释放计数引用）
+                    if time > 15 {
+                        break Ok(());
                     }
+
+                    static_time.store(time, Ordering::Relaxed);
                 }
             })
         };
@@ -200,25 +305,29 @@ impl BridgeClient {
             udp: Arc::downgrade(&udp),
             saddr,
             baddr: udp.local_addr()?,
-            gc,
+            runtime,
         })
     }
 
-    pub async fn recv_from(&self, b: &mut [u8]) -> Option<(usize, SocketAddr)> {
+    pub async fn recv_from(&self, b: &mut [u8]) -> IResult<(usize, SocketAddr)> {
         match self.udp.upgrade() {
-            Some(arc) => arc.recv_from(b).await.ok(),
-            None => None,
+            Some(arc) => Ok(arc.recv_from(b).await?),
+            None => Err(anyhow::anyhow!("The Arc has been dropped")),
         }
     }
 
-    pub async fn send_to(&self, b: &[u8], d: &SocketAddr) -> Option<()> {
+    pub async fn send_to(&self, b: &[u8], d: &SocketAddr) -> IResult<()> {
         match self.udp.upgrade() {
             Some(arc) => {
-                arc.send_to(b, d).await.ok()?;
-                Some(())
+                arc.send_to(b, d).await?;
+                Ok(())
             }
-            None => None,
+            None => Err(anyhow::anyhow!("The Arc has been dropped")),
         }
+    }
+
+    pub async fn alive(&self) -> bool {
+        self.udp.upgrade().is_some()
     }
 
     #[inline]
@@ -243,6 +352,17 @@ impl BridgeClient {
 
 impl Drop for BridgeClient {
     fn drop(&mut self) {
-        self.gc.abort();
+        self.runtime.abort();
     }
+}
+
+pub async fn log_i_result<F>(name: &str, future: F) -> IResult<()>
+where
+    F: std::future::Future<Output = IResult<()>>,
+{
+    let result = future.await;
+    if let Err(ref err) = result {
+        println!("`{}`已断开。因为：{}", name, err);
+    }
+    result
 }

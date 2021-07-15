@@ -1,6 +1,6 @@
 use std::convert::TryFrom;
 use std::net::SocketAddr;
-//use std::time::Duration;
+use std::time::Duration;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
@@ -13,11 +13,7 @@ mod server;
 
 #[tokio::main]
 async fn main() {
-    let srv = SocketAddr::new(
-        [123, 207, 9, 213] /*[127,0,0,1]*/
-            .into(),
-        27979,
-    );
+    let srv = SocketAddr::new(/*[123, 207, 9, 213]*/ [127, 0, 0, 1].into(), 27979);
     let matches = clap_app!(
         MCMU=>
         (version:"1.0")
@@ -58,11 +54,14 @@ async fn main() {
             host::Host::run(srv).await
         }
 
-        ("j", Some(subm)) => match hex::decode(subm.value_of("ROOM_NUM").unwrap()) {
-            Ok(vec) if vec.len() == 4 => {
+        ("j", Some(subm)) => match subm
+            .value_of("ROOM_NUM")
+            .unwrap()
+            .parse::<public::Identity2>()
+        {
+            Ok(num) => {
                 println!("测试版，服务器地址已自动填入");
-                let num = <[u8; 4]>::try_from(vec).unwrap();
-                client::Client::run(srv, u32::from_be_bytes(num)).await
+                client::Client::run(srv, num).await
             }
             _ => {
                 println!("输入的房间号无效");
@@ -71,7 +70,7 @@ async fn main() {
         },
 
         _ => {
-            println!("请添加 --help 参数来显示帮助");
+            println!("请使用 --help 参数来显示帮助");
             Ok(())
         }
     };
@@ -96,3 +95,37 @@ async fn main() {
         }
     }*/
 }
+
+/*fn main() {
+    let rt_ = std::sync::Arc::new(tokio::runtime::Runtime::new().unwrap());
+    let rt = rt_.clone();
+    rt_.block_on(async move {
+        const PORT: u16 = 17792;
+        rt.spawn(server::Server::run(SocketAddr::new(
+            [0, 0, 0, 0].into(),
+            PORT,
+        )));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        println!("服务器已启动");
+
+        rt.spawn(host::Host::run(SocketAddr::new(
+            [127, 0, 0, 1].into(),
+            PORT,
+        )));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        println!("已启动房间");
+
+        rt.spawn(client::Client::run(
+            SocketAddr::new([127, 0, 0, 1].into(), PORT),
+            123456,
+        ));
+        tokio::time::sleep(Duration::from_millis(10000)).await;
+        println!("已启动玩家");
+        /*match tokio::try_join!(srv, host) {
+            Ok(_) => {}
+            Err(err) => {
+                println!("main error: {}", err);
+            }
+        }*/
+    });
+}*/
