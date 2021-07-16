@@ -4,7 +4,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
         Arc, Weak,
     },
     time::Duration,
@@ -47,10 +47,12 @@ pub struct BridgeClient {
     saddr: SocketAddr,
     baddr: SocketAddr,
     runtime: JoinHandle<IResult<()>>,
+    gc_timer: Arc<AtomicU8>,
 }
 
 struct RingBuffer {
     buffer: Box<[u8]>,
+    //writing:AtomicBool,
     start: AtomicUsize,
     end: AtomicUsize,
 }
@@ -204,10 +206,10 @@ impl<'a> MCPEInfo<'a> {
         slices[1] = self.world_name.as_bytes();
         let game_port1 = (self.game_port - 1).to_string();
         let game_port2 = self.game_port.to_string();
-        slices[4] = game_port1.as_bytes();
-        slices[5] = game_port2.as_bytes();
+        slices[3] = game_port1.as_bytes();
+        slices[4] = game_port2.as_bytes();
 
-        return slices.concat();
+        return slices.join(&b";"[..]);
     }
 }
 
@@ -219,7 +221,7 @@ impl BridgeClient {
         name: &'static str,
     ) -> IResult<Self> {
         let udp = Arc::new(UdpSocket::bind(baddr).await?);
-
+        let gc_timer = Arc::new(AtomicU8::new(0)); //垃圾回收计时器
         let packet = {
             let mut packet = [0u8; 5];
             packet[0] = CommunicatePacket::CONNECT;
@@ -234,7 +236,7 @@ impl BridgeClient {
                 loop {
                     if let Err(err) = udp.send_to(&packet, &saddr).await {
                         println_lined!("Unexpected error:{}", err);
-                    }else{
+                    } else {
                         println_lined!("{}已发包: {}", name, cid);
                     }
                     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -247,7 +249,7 @@ impl BridgeClient {
             let udp = udp.clone();
             let saddr = saddr.clone();
             let result = tokio::time::timeout(Duration::from_secs(10), async move {
-                let mut buf = [0u8; 5];
+                let mut buf = [0u8; 1500];
                 loop {
                     let (len, raddr) = udp.recv_from(&mut buf).await?;
                     if raddr == saddr && buf[..len] == packet {
@@ -273,18 +275,20 @@ impl BridgeClient {
 
         println!("`{}`连接成功", name);
 
-        let static_time = Arc::new(AtomicU8::new(0));
         //启动心跳包运行时和垃圾清理运行时
         let runtime: JoinHandle<IResult<()>> = {
             let udp = udp.clone();
-            let static_time = static_time.clone();
+            let gc_timer = gc_timer.clone();
             let saddr = saddr.clone();
             tokio::spawn(async move {
                 let packet = [CommunicatePacket::HEARTBEAT];
                 let mut interval = tokio::time::interval(Duration::from_secs(2));
                 loop {
                     interval.tick().await;
-                    let time = static_time.load(Ordering::Relaxed) + 1;
+                    udp.send_to(&packet, &saddr).await?;
+                    continue;
+
+                    let time = gc_timer.load(Ordering::Relaxed) + 1;
 
                     //静止时间大于7s开始发送心跳包
                     if time > 7 {
@@ -296,7 +300,7 @@ impl BridgeClient {
                         break Ok(());
                     }
 
-                    static_time.store(time, Ordering::Relaxed);
+                    gc_timer.store(time, Ordering::Relaxed);
                 }
             })
         };
@@ -306,12 +310,22 @@ impl BridgeClient {
             saddr,
             baddr: udp.local_addr()?,
             runtime,
+            gc_timer,
         })
     }
 
     pub async fn recv_from(&self, b: &mut [u8]) -> IResult<(usize, SocketAddr)> {
         match self.udp.upgrade() {
-            Some(arc) => Ok(arc.recv_from(b).await?),
+            Some(arc) => loop {
+                let (len, raddr) = arc.recv_from(b).await?;
+                self.gc_timer.store(0, Ordering::Relaxed);
+
+                if b[0] == CommunicatePacket::DATA {
+                    println!("RECV {:?}", &b[1..len]);
+                    b.copy_within(1..len, 0);
+                    break Ok((len - 1, raddr));
+                }
+            },
             None => Err(anyhow::anyhow!("The Arc has been dropped")),
         }
     }
@@ -320,6 +334,7 @@ impl BridgeClient {
         match self.udp.upgrade() {
             Some(arc) => {
                 arc.send_to(b, d).await?;
+                println!("SEND");
                 Ok(())
             }
             None => Err(anyhow::anyhow!("The Arc has been dropped")),

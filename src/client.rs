@@ -1,5 +1,5 @@
 use crate::println_lined;
-use crate::public::{log_i_result, BridgeClient, IResult, Identity, MCPEInfo, Operate};
+use crate::public::*;
 use std::net::{IpAddr, SocketAddr};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -11,6 +11,12 @@ pub struct Client;
 
 impl Client {
     pub async fn run(saddr: SocketAddr, cid: Identity) -> IResult<()> {
+        #[cfg(target_os = "windows")]
+        println!(
+            "您正处于Windows环境，因为其限制，请于Minecraft服务器列表中添加\
+            一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138。\n**另外请注意，\
+            Windows暂时不能开服（当然我们不阻止您尝试）**\n"
+        );
         let mut tcp = TcpStream::connect(saddr.clone()).await?;
         let mut tcp_buf = [0u8; 32];
         tcp.write(&Operate::HelloTo(cid).serialize()).await?;
@@ -18,7 +24,8 @@ impl Client {
         let len = tcp.read(&mut tcp_buf).await?;
         match Operate::deserialize(&tcp_buf[..len]) {
             Some(Operate::ConnectToMe(cid1, cid2)) => {
-                println!("Connected to the server successfully! Connecting to the room ...");
+                drop(tcp);
+                println!("成功连接到服务器，正在连接到房主...");
 
                 //记录游戏管道端口，以便后期魔改
                 let (tx, rx) = tokio::sync::oneshot::channel::<u16>();
@@ -30,7 +37,6 @@ impl Client {
                 let game_pipe: JoinHandle<IResult<()>> = {
                     let saddr = saddr.clone();
                     tokio::spawn(log_i_result("游戏管道", async move {
-                        let mut buf = [0u8; 1024];
                         let b2 = BridgeClient::connect(
                             cid2,
                             saddr,
@@ -44,11 +50,14 @@ impl Client {
                         }
 
                         let mut mc_addr: Option<SocketAddr> = None;
+                        let mut buf = [0u8; 1500];
+                        buf[0] = CommunicatePacket::DATA;
+
                         loop {
-                            let (len, raddr) = match b2.recv_from(&mut buf).await {
+                            let (len, raddr) = match b2.recv_from(&mut buf[1..]).await {
                                 Ok(v) => v,
                                 Err(err) => {
-                                    println!("`game` pipe has disconnected: {}", err);
+                                    println!("客户端游戏管道已断开，因为: {}", err);
                                     break;
                                 }
                             };
@@ -58,14 +67,16 @@ impl Client {
                                 None => {
                                     if raddr.ip() != saddr.ip() {
                                         mc_addr = Some(raddr);
-                                        b2.send_to(&buf[..len], saddr).await?;
+                                        b2.send_to(&buf[..len + 1], saddr).await?;
                                     }
                                 }
                                 Some(ref laddr) => {
                                     if raddr == *laddr {
-                                        b2.send_to(&buf[..len], saddr).await?;
+                                        //从本地发来
+                                        b2.send_to(&buf[..len + 1], saddr).await?;
                                     } else if raddr == *saddr {
-                                        b2.send_to(&buf[..len], laddr).await?;
+                                        //从房主发来
+                                        b2.send_to(&buf[2..len + 1], laddr).await?;
                                     }
                                 }
                             }
@@ -78,11 +89,17 @@ impl Client {
                 let info_pipe = {
                     let saddr = saddr.clone();
                     tokio::spawn(log_i_result("信息管道", async move {
-                        let mut buf = [0u8; 1024];
                         let b1 = BridgeClient::connect(
                             cid1,
                             saddr.clone(),
-                            SocketAddr::new([0,0,0,0].into(),19132),
+                            SocketAddr::new(
+                                [0, 0, 0, 0].into(),
+                                if cfg!(target_os = "windows") {
+                                    19138
+                                } else {
+                                    19132
+                                },
+                            ),
                             "客户端信息管道",
                         )
                         .await?;
@@ -91,11 +108,14 @@ impl Client {
                         let mut laddr_option: Option<SocketAddr> = None;
                         let mut cache_check = Vec::new();
                         let mut cache_load = Vec::new();
+                        let mut buf = [0u8; 1500];
+                        buf[0] = CommunicatePacket::DATA;
+
                         loop {
-                            let (len, raddr) = match b1.recv_from(&mut buf).await {
+                            let (len, raddr) = match b1.recv_from(&mut buf[1..]).await {
                                 Ok(v) => v,
                                 Err(err) => {
-                                    println!("`info` pipe has disconnected: {}", err);
+                                    println!("客户端信息管道已断开，因为：{}", err);
                                     break;
                                 }
                             };
@@ -105,20 +125,20 @@ impl Client {
                                 None => {
                                     if raddr.ip() != saddr.ip() {
                                         laddr_option = Some(raddr);
-                                        b1.send_to(&buf[..len], saddr).await?;
+                                        b1.send_to(&buf[..len + 1], saddr).await?;
                                     }
                                 }
 
                                 Some(ref laddr) => {
-                                    let bytes = &buf[..len];
                                     if raddr == *laddr {
                                         //从本地主机发来
-                                        b1.send_to(bytes, saddr).await?;
+                                        b1.send_to(&buf[..len + 1], saddr).await?;
                                     } else if raddr == *saddr {
                                         //从服务器发来（需要修改）
-                                        if bytes != &cache_check {
+                                        let data = &buf[2..len + 1];
+                                        if data != &cache_check {
                                             println!("Unconnected ping modified");
-                                            let mut info = match MCPEInfo::deserialize(bytes) {
+                                            let mut info = match MCPEInfo::deserialize(data) {
                                                 Some(v) => v,
                                                 None => {
                                                     println_lined!("The protocol is malformed");
@@ -126,9 +146,16 @@ impl Client {
                                                 }
                                             };
                                             info.game_port = gport;
-                                            cache_check = bytes.to_owned();
+                                            cache_check = data.to_owned();
                                             cache_load = info.serialize();
                                         }
+                                        println!("{}", String::from_utf8_lossy(&data));
+                                        lazy_static! {
+                                            static ref STREAM:Vec<u8>=hex::decode(
+                                                "1c0000000000d1fe2180f5403287a99bb200ffff00fefefefefdfdfdfd12345678005d4d4350453b46616e6379466c616d65583b3435363b312e31372e32302e32323b313b383b31333738363935373235393131343130313130353be68891e79a84e4b896e7958c3b43726561746976653b313b35343339323b35343339333b"
+                                            ).unwrap();
+                                        }
+
                                         b1.send_to(&cache_load, laddr).await?;
                                     }
                                 }
@@ -138,7 +165,7 @@ impl Client {
                     }))
                 };
 
-                tokio::try_join!(info_pipe, game_pipe).unwrap();
+                game_pipe.await;
             }
 
             Some(Operate::OperationFailed) => {
