@@ -13,7 +13,7 @@ mod server;
 
 #[tokio::main]
 async fn main() {
-    let srv = SocketAddr::new(/*[123, 207, 9, 213]*/ [127, 0, 0, 1].into(), 27979);
+    let srv = SocketAddr::new([39,108,179,179].into()/* [127, 0, 0, 1].into()*/, 27979);
     let matches = clap_app!(
         MCMU=>
         (version:"1.0")

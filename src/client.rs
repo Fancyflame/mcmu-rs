@@ -82,7 +82,7 @@ impl Client {
                         let b1 = BridgeClient::connect(
                             cid1,
                             saddr.clone(),
-                            "127.0.0.1:19132".parse().unwrap(),
+                            SocketAddr::new([0,0,0,0].into(),19132),
                             "客户端信息管道",
                         )
                         .await?;

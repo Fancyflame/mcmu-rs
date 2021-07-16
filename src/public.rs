@@ -234,9 +234,9 @@ impl BridgeClient {
                 loop {
                     if let Err(err) = udp.send_to(&packet, &saddr).await {
                         println_lined!("Unexpected error:{}", err);
-                        continue;
+                    }else{
+                        println_lined!("{}已发包: {}", name, cid);
                     }
-                    println_lined!("{}已发包: {}", name, cid);
                     tokio::time::sleep(Duration::from_millis(1000)).await;
                 }
             })
