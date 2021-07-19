@@ -1,18 +1,16 @@
-pub mod ring_buffer;
-
 use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::Duration,
 };
 use tokio::{net::UdpSocket, task::JoinHandle};
-use ring_buffer::RingBuffer;
+//use crate::ring_buffer;
 
 pub type Identity = u32;
 pub type Identity2 = u32;
@@ -49,8 +47,9 @@ pub struct BridgeClient {
     udp: Arc<UdpSocket>,
     saddr: SocketAddr,
     baddr: SocketAddr,
-    runtime: JoinHandle<IResult<()>>,
+    runtimes: [JoinHandle<IResult<()>>; 2],
     alive: AtomicBool,
+    //buffer:ring_buffer::Reader
 }
 
 impl CommunicatePacket {
@@ -59,7 +58,7 @@ impl CommunicatePacket {
     pub const DATA: u8 = 2;
     pub const HEARTBEAT: u8 = 3;
     //pub const RESET: u8 = 4;
-    pub const CLOSE:u8=5;
+    pub const CLOSE: u8 = 5;
 }
 
 impl Operate {
@@ -131,12 +130,16 @@ impl<'a> MCPEInfo<'a> {
 }
 
 impl BridgeClient {
-    pub async fn connect(
+    pub async fn connect<F>(
         cid: Identity2,
         saddr: SocketAddr, //服务器的地址
         baddr: SocketAddr, //绑定的地址
         name: &'static str,
-    ) -> IResult<Self> {
+        handler: F,
+    ) -> IResult<Self>
+    where
+        F: FnMut(&[u8]) -> IResult<()>,
+    {
         let udp = Arc::new(UdpSocket::bind(baddr).await?);
         let packet = {
             let mut packet = [0u8; 5];
@@ -192,7 +195,7 @@ impl BridgeClient {
         println!("`{}`连接成功", name);
 
         //启动心跳包运行时和垃圾清理运行时
-        let runtime: JoinHandle<IResult<()>> = {
+        let pack_sender: JoinHandle<IResult<()>> = {
             let udp = udp.clone();
             let saddr = saddr.clone();
             tokio::spawn(async move {
@@ -205,42 +208,48 @@ impl BridgeClient {
             })
         };
 
+        //监听数据写进缓冲区
+        let pack_receiver: JoinHandle<IResult<()>> = {
+            let udp = udp.clone();
+            tokio::spawn(async move { loop {} })
+        };
+
         Ok(BridgeClient {
+            baddr: udp.local_addr()?,
             udp,
             saddr,
-            baddr: udp.local_addr()?,
-            runtime,
-            alive:AtomicBool::new(true)
+            runtimes: [pack_sender, pack_receiver],
+            alive: AtomicBool::new(true),
         })
     }
 
     pub async fn recv_from(&self, b: &mut [u8]) -> IResult<(usize, SocketAddr)> {
-        if !self.alive(){
+        if !self.alive() {
             return Err(anyhow::anyhow!("The Arc has been dropped"));
         }
 
-        loop{
+        loop {
             let bundle = self.udp.recv_from(b).await?;
-            if bundle.1==self.saddr {
-                match b[0]{
-                    CommunicatePacket::DATA=>{
+            if bundle.1 == self.saddr {
+                match b[0] {
+                    CommunicatePacket::DATA => {
                         println!("RECV {:?}", &b[1..bundle.0]);
                         break Ok(bundle);
                     }
-                    CommunicatePacket::CLOSE=>{
-                        self.alive.store(false,Ordering::Relaxed);
-                        break self.recv_from(b);
+                    CommunicatePacket::CLOSE => {
+                        self.alive.store(false, Ordering::Relaxed);
+                        break Err(anyhow::anyhow!("The Arc has been dropped"));
                     }
-                    _=>continue
+                    _ => continue,
                 }
-            }else{
+            } else {
                 break Ok(bundle);
             }
         }
     }
 
     pub async fn send_to(&self, b: &[u8], d: &SocketAddr) -> IResult<()> {
-        if !self.alive(){
+        if !self.alive() {
             return Err(anyhow::anyhow!("The Arc has been dropped"));
         }
 
@@ -275,7 +284,9 @@ impl BridgeClient {
 
 impl Drop for BridgeClient {
     fn drop(&mut self) {
-        self.runtime.abort();
+        for x in self.runtimes.iter_mut() {
+            x.abort();
+        }
     }
 }
 
