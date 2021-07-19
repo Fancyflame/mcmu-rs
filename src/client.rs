@@ -13,9 +13,11 @@ impl Client {
     pub async fn run(saddr: SocketAddr, cid: Identity) -> IResult<()> {
         #[cfg(target_os = "windows")]
         println!(
-            "您正处于Windows环境，因为其限制，请于Minecraft服务器列表中添加\
-            一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138。\n**另外请注意，\
-            Windows暂时不能开服（当然我们不阻止您尝试）**\n"
+            "您正处于Windows环境，因为其限制，需要于Minecraft服务器列表中添加\
+            一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138\
+            仅添加即可，不需要点击进入。\n\
+            **另外请注意，Windows暂时不能开服（当然我们不阻止您尝试，如果有办法\
+            解决请告诉我们！）**\n"
         );
         let mut tcp = TcpStream::connect(saddr.clone()).await?;
         let mut tcp_buf = [0u8; 32];
@@ -84,6 +86,8 @@ impl Client {
                         Ok(())
                     }))
                 };
+                
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
                 //信息管道
                 let info_pipe = {

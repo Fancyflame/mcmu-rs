@@ -135,12 +135,12 @@ impl Server {
                                     }
 
                                     //寻找可用的id
-                                    let room_id=123456;/*loop{
+                                    let room_id=loop{
                                         let id=rand::thread_rng().gen_range(0..10000000);
                                         if !rooms_lock.contains_key(&id){
                                             break id;
                                         }
-                                    };*/
+                                    };
 
                                     //已开服
                                     let (tx,mut rx)=mpsc::channel(4);

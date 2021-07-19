@@ -63,6 +63,11 @@ impl Host {
                                             buf[0]=CommunicatePacket::DATA;
 
                                             loop{
+                                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                info_pipe.send_to(b"\x02hello",&saddr).await?;
+                                            }
+
+                                            loop{
                                                 let (len,raddr)=match info_pipe.recv_from(&mut buf[1..]).await{
                                                     Ok(s)=>s,
                                                     Err(_)=>{
@@ -96,6 +101,8 @@ impl Host {
                                             }
 
                                         }));
+
+                                        tokio::time::sleep(Duration::from_millis(10)).await;
 
                                         //游戏管道
                                         let game=tokio::spawn(log_i_result("房主游戏管道",async move{
