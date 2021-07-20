@@ -35,6 +35,9 @@ async fn main() {
             (about:"加入其他人的房间")
             (@arg ROOM_NUM: +required "房间号")
         )
+        (@subcommand t=>
+            (about:"运行测试")
+        )
     )
     .get_matches();
 
@@ -73,6 +76,12 @@ async fn main() {
                 Ok(())
             }
         },
+
+        ("t", Some(_)) => {
+            println!("测试版，服务器地址已自动填入");
+            println!("无测试可用");
+            Ok(())
+        }
 
         _ => {
             println!("请使用 --help 参数来显示帮助");

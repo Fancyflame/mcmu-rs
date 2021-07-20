@@ -7,7 +7,7 @@ use std::{
     //io::Write,
     net::{IpAddr, SocketAddr},
     sync::{
-        atomic::{AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
         Arc,
     },
     time::Duration,
@@ -40,6 +40,13 @@ struct Bridge {
 enum BridgePeer {
     Empty(IpAddr),
     Ready(SocketAddr),
+}
+
+#[derive(Debug)]
+struct TableItem {
+    raddr: SocketAddr,
+    static_time: AtomicU8,
+    remote_has_dead: Arc<AtomicBool>,
 }
 
 impl Bridge {
@@ -84,12 +91,12 @@ impl Bridge {
 
 impl Server {
     pub async fn run(addr: SocketAddr) -> IResult<()> {
+        //连接口令计数器（生成器）
         let bridge_counter = Arc::new(AtomicU32::new(random()));
+        //等待连接
         let bridges = Arc::new(Mutex::new(HashMap::<Identity2, Bridge>::new()));
         //转发表
-        let table = Arc::new(RwLock::new(
-            HashMap::<SocketAddr, (SocketAddr, Arc<AtomicU8>, bool)>::new(), //这里的bool应该为常量，防止在垃圾检测时被重复加时
-        ));
+        let table = Arc::new(RwLock::new(HashMap::<SocketAddr, TableItem>::new()));
 
         //构建连接的通信服务器
         let connecter: JoinHandle<IResult<()>> = {
@@ -135,12 +142,12 @@ impl Server {
                                     }
 
                                     //寻找可用的id
-                                    let room_id=loop{
+                                    let room_id=123456;/*loop{
                                         let id=rand::thread_rng().gen_range(0..10000000);
                                         if !rooms_lock.contains_key(&id){
                                             break id;
                                         }
-                                    };
+                                    };*/
 
                                     //已开服
                                     let (tx,mut rx)=mpsc::channel(4);
@@ -268,8 +275,12 @@ impl Server {
                             let table_read = table.read().await;
                             match table_read.get(&addr) {
                                 //转发
-                                Some((raddr, arc, _)) => {
-                                    arc.store(0, Ordering::Relaxed);
+                                Some(TableItem {
+                                    ref raddr,
+                                    ref static_time,
+                                    ..
+                                }) => {
+                                    static_time.store(0, Ordering::Relaxed);
                                     match buf[0] {
                                         CommunicatePacket::DATA => {
                                             println!("DATA!");
@@ -277,13 +288,14 @@ impl Server {
                                         }
                                         CommunicatePacket::CONNECT => {
                                             println!("CONN");
+                                            buf[0] = CommunicatePacket::ACK;
                                             socket.send_to(&buf[..len], addr).await.unwrap();
                                         }
                                         CommunicatePacket::HEARTBEAT => {}
                                         _ => {
                                             let l = if len < 10 { len } else { 10 };
                                             println_lined!(
-                                                "Malformed packet: {:?}. Ignored.",
+                                                "Malformed or invalid packet: {:?}. Ignored.",
                                                 &buf[..l]
                                             );
                                         }
@@ -299,9 +311,10 @@ impl Server {
                                             let cid = Identity2::from_be_bytes(
                                                 buf[1..5].try_into().unwrap(),
                                             );
+
                                             if let Some(bri) = bridges_lock.get_mut(&cid) {
                                                 //地址不对应
-                                                if let Err(err) = bri.upgrade(addr) {
+                                                if let Err(_err) = bri.upgrade(addr) {
                                                     println_lined!("{:#?}", *table.read().await);
                                                     continue;
                                                 }
@@ -312,27 +325,44 @@ impl Server {
 
                                                 let (a1, a2) =
                                                     bridges_lock.remove(&cid).unwrap().finish();
-                                                let arc = Arc::new(AtomicU8::new(0));
 
-                                                socket.send_to(&buf[..len], &a1).await.unwrap();
-                                                socket.send_to(&buf[..len], &a2).await.unwrap();
                                                 println!("正在桥接");
 
                                                 let mut table_lock = table.write().await;
+                                                let arc = Arc::new(AtomicBool::new(false));
+
                                                 table_lock.insert(
                                                     a1.clone(),
-                                                    (a2.clone(), arc.clone(), true),
+                                                    TableItem {
+                                                        raddr: a2.clone(),
+                                                        static_time: AtomicU8::new(0),
+                                                        remote_has_dead: arc.clone(),
+                                                    },
                                                 );
-                                                table_lock.insert(a2, (a1, arc, false));
+                                                table_lock.insert(
+                                                    a2.clone(),
+                                                    TableItem {
+                                                        raddr: a1.clone(),
+                                                        static_time: AtomicU8::new(0),
+                                                        remote_has_dead: arc,
+                                                    },
+                                                );
+
+                                                buf[0] = CommunicatePacket::ACK;
+                                                socket.send_to(&buf[..5], a1).await.unwrap();
+                                                socket.send_to(&buf[..5], a2).await.unwrap();
 
                                                 println!("成功桥接");
                                             }
                                         }
 
-                                        CommunicatePacket::HEARTBEAT => {}
-
                                         _ => {
-                                            println_lined!("???: {:?}", &buf[..10]);
+                                            println_lined!(
+                                                "???: {:?}",
+                                                &buf[..if len < 10 { len } else { 10 }]
+                                            );
+                                            const CLOSE: [u8; 1] = [CommunicatePacket::CLOSE];
+                                            socket.send_to(&CLOSE, addr).await.unwrap();
                                         }
                                     }
                                 }
@@ -366,13 +396,20 @@ impl Server {
                     //再清理死亡的
                     let mut table_lock = table.write().await;
                     table_lock.retain(|_, v| {
-                        let mut val = v.1.load(Ordering::Relaxed);
-                        if v.2 {
-                            //避免重复加时
-                            val += 5;
-                            v.1.store(val, Ordering::Relaxed);
+                        if v.remote_has_dead.load(Ordering::Relaxed) {
+                            return false;
                         }
-                        val < 20
+
+                        let mut val = v.static_time.load(Ordering::Relaxed);
+                        val += 5;
+                        v.static_time.store(val, Ordering::Relaxed);
+                        if val < 10 {
+                            true
+                        } else {
+                            println!("回收");
+                            v.remote_has_dead.store(true, Ordering::Relaxed);
+                            false
+                        }
                     });
                 }
             })
@@ -384,10 +421,14 @@ impl Server {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                    bridges.lock().await;
-                    println!("bridges检查完毕");
-                    table.write().await;
-                    println!("table检查完毕");
+                    if let Err(_err) = tokio::time::timeout(Duration::from_secs(1), async {
+                        bridges.lock().await;
+                        table.write().await;
+                    })
+                    .await
+                    {
+                        println!("服务器发生死锁！");
+                    }
                 }
             });
         };

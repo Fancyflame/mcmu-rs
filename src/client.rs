@@ -53,10 +53,9 @@ impl Client {
 
                         let mut mc_addr: Option<SocketAddr> = None;
                         let mut buf = [0u8; 1500];
-                        buf[0] = CommunicatePacket::DATA;
 
                         loop {
-                            let (len, raddr) = match b2.recv_from(&mut buf[1..]).await {
+                            let (len, raddr) = match b2.recv_from(&mut buf).await {
                                 Ok(v) => v,
                                 Err(err) => {
                                     println!("客户端游戏管道已断开，因为: {}", err);
@@ -69,16 +68,16 @@ impl Client {
                                 None => {
                                     if raddr.ip() != saddr.ip() {
                                         mc_addr = Some(raddr);
-                                        b2.send_to(&buf[..len + 1], saddr).await?;
+                                        b2.send_to(&buf[..len], saddr).await?;
                                     }
                                 }
                                 Some(ref laddr) => {
                                     if raddr == *laddr {
                                         //从本地发来
-                                        b2.send_to(&buf[..len + 1], saddr).await?;
+                                        b2.send_to(&buf[..len], saddr).await?;
                                     } else if raddr == *saddr {
                                         //从房主发来
-                                        b2.send_to(&buf[2..len + 1], laddr).await?;
+                                        b2.send_to(&buf[..len], laddr).await?;
                                     }
                                 }
                             }
@@ -86,11 +85,11 @@ impl Client {
                         Ok(())
                     }))
                 };
-                
+
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
                 //信息管道
-                let info_pipe = {
+                let _info_pipe = {
                     let saddr = saddr.clone();
                     tokio::spawn(log_i_result("信息管道", async move {
                         let b1 = BridgeClient::connect(
@@ -113,10 +112,9 @@ impl Client {
                         let mut cache_check = Vec::new();
                         let mut cache_load = Vec::new();
                         let mut buf = [0u8; 1500];
-                        buf[0] = CommunicatePacket::DATA;
 
                         loop {
-                            let (len, raddr) = match b1.recv_from(&mut buf[1..]).await {
+                            let (len, raddr) = match b1.recv_from(&mut buf).await {
                                 Ok(v) => v,
                                 Err(err) => {
                                     println!("客户端信息管道已断开，因为：{}", err);
@@ -129,17 +127,17 @@ impl Client {
                                 None => {
                                     if raddr.ip() != saddr.ip() {
                                         laddr_option = Some(raddr);
-                                        b1.send_to(&buf[..len + 1], saddr).await?;
+                                        b1.send_to(&buf[..len], saddr).await?;
                                     }
                                 }
 
                                 Some(ref laddr) => {
                                     if raddr == *laddr {
                                         //从本地主机发来
-                                        b1.send_to(&buf[..len + 1], saddr).await?;
+                                        b1.send_to(&buf[..len], saddr).await?;
                                     } else if raddr == *saddr {
                                         //从服务器发来（需要修改）
-                                        let data = &buf[2..len + 1];
+                                        let data = &buf[..len];
                                         if data != &cache_check {
                                             println!("Unconnected ping modified");
                                             let mut info = match MCPEInfo::deserialize(data) {
@@ -153,7 +151,7 @@ impl Client {
                                             cache_check = data.to_owned();
                                             cache_load = info.serialize();
                                         }
-                                        println!("{}", String::from_utf8_lossy(&data));
+                                        println!("{}", String::from_utf8_lossy(data));
                                         lazy_static! {
                                             static ref STREAM:Vec<u8>=hex::decode(
                                                 "1c0000000000d1fe2180f5403287a99bb200ffff00fefefefefdfdfdfd12345678005d4d4350453b46616e6379466c616d65583b3435363b312e31372e32302e32323b313b383b31333738363935373235393131343130313130353be68891e79a84e4b896e7958c3b43726561746976653b313b35343339323b35343339333b"
@@ -169,7 +167,7 @@ impl Client {
                     }))
                 };
 
-                game_pipe.await;
+                dbg!(game_pipe.await);
             }
 
             Some(Operate::OperationFailed) => {

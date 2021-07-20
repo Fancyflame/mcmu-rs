@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::UdpSocket, task::JoinHandle};
+use tokio::{net::UdpSocket, sync::broadcast, task::JoinHandle};
 //use crate::ring_buffer;
 
 pub type Identity = u32;
@@ -47,18 +47,17 @@ pub struct BridgeClient {
     udp: Arc<UdpSocket>,
     saddr: SocketAddr,
     baddr: SocketAddr,
-    runtimes: [JoinHandle<IResult<()>>; 2],
-    alive: AtomicBool,
-    //buffer:ring_buffer::Reader
+    runtimes: [JoinHandle<IResult<()>>; 1],
+    name: &'static str, //buffer:ring_buffer::Reader
+    alive: Arc<AtomicBool>,
 }
 
 impl CommunicatePacket {
     pub const CONNECT: u8 = 0;
-    //pub const ACK: u8 = 1;
+    pub const ACK: u8 = 1;
     pub const DATA: u8 = 2;
     pub const HEARTBEAT: u8 = 3;
-    //pub const RESET: u8 = 4;
-    pub const CLOSE: u8 = 5;
+    pub const CLOSE: u8 = 4;
 }
 
 impl Operate {
@@ -130,28 +129,26 @@ impl<'a> MCPEInfo<'a> {
 }
 
 impl BridgeClient {
-    pub async fn connect<F>(
+    pub async fn connect(
         cid: Identity2,
         saddr: SocketAddr, //服务器的地址
         baddr: SocketAddr, //绑定的地址
         name: &'static str,
-        handler: F,
-    ) -> IResult<Self>
-    where
-        F: FnMut(&[u8],SocketAddr) -> IResult<()>,
-    {
+    ) -> IResult<Self> {
         let udp = Arc::new(UdpSocket::bind(baddr).await?);
-        let packet = {
-            let mut packet = [0u8; 5];
-            packet[0] = CommunicatePacket::CONNECT;
-            (&mut packet[1..5]).write(&cid.to_be_bytes()).unwrap();
-            packet
-        };
+        let alive = Arc::new(AtomicBool::new(true));
 
         //间隔发包
         let pinger = {
             let udp = udp.clone();
             tokio::spawn(async move {
+                let packet = {
+                    let mut packet = [0u8; 5];
+                    packet[0] = CommunicatePacket::CONNECT;
+                    (&mut packet[1..5]).write(&cid.to_be_bytes()).unwrap();
+                    packet
+                };
+
                 loop {
                     if let Err(err) = udp.send_to(&packet, &saddr).await {
                         println_lined!("Unexpected error:{}", err);
@@ -167,19 +164,27 @@ impl BridgeClient {
         {
             let udp = udp.clone();
             let saddr = saddr.clone();
+            let cid_bytes = cid.to_be_bytes();
+
             let result = tokio::time::timeout(Duration::from_secs(10), async move {
                 let mut buf = [0u8; 1500];
                 loop {
                     let (len, raddr) = udp.recv_from(&mut buf).await?;
-                    if raddr == saddr && buf[..len] == packet {
+                    if len == 5
+                        && raddr == saddr
+                        && buf[0] == CommunicatePacket::ACK
+                        && buf[1..5] == cid_bytes
+                    {
                         break IResult::Ok(());
                     } else {
-                        println!("检验错误");
+                        println!("检验错误 {:?}", &buf[..len]);
                     }
                 }
             })
             .await;
+
             pinger.abort();
+
             match result {
                 Ok(n) => {
                     n?;
@@ -194,81 +199,108 @@ impl BridgeClient {
 
         println!("`{}`连接成功", name);
 
-
-        //启动心跳包运行时和垃圾清理运行时
+        //启动心跳包运行时
         let pack_sender: JoinHandle<IResult<()>> = {
             let udp = udp.clone();
             let saddr = saddr.clone();
+            let alive = alive.clone();
             tokio::spawn(async move {
-                let packet = [CommunicatePacket::HEARTBEAT];
+                const PACKET: [u8; 1] = [CommunicatePacket::HEARTBEAT];
                 let mut interval = tokio::time::interval(Duration::from_secs(2));
                 loop {
                     interval.tick().await;
-                    udp.send_to(&packet, &saddr).await?;
-                }
-            })
-        };
-
-
-        //TODO 改为函数式，增添&mut [u8]数组储存
-        //处理数据
-        let pack_receiver: JoinHandle<IResult<()>> = {
-            let udp = udp.clone();
-            let mut buf=[0u8;1500];
-            tokio::spawn(async move {
-                loop {
-                    let (len,raddr)=match udp.recv_from(&mut buf).await{
-                        Ok(n)=>n,
-                        Err(err)=>{
-                            println!("`{}` read error: {}. Ignored.",);
-                            continue;
+                    match udp.send_to(&PACKET, &saddr).await {
+                        Ok(_) => {}
+                        Err(err) => {
+                            println_lined!("ERR: {}", err);
+                            alive.store(false, Ordering::Relaxed);
                         }
-                    };
-
-                    if raddr == self.saddr {
-                        match b[0] {
-                            CommunicatePacket::DATA => {
-                                println!("RECV {:?}", &b[1..bundle.0]);
-                                handler(&buf[1..len])?;
-                            }
-                            CommunicatePacket::CLOSE => {
-                                self.alive.store(false, Ordering::Relaxed);
-                                break Err(anyhow::anyhow!("The Arc has been dropped"));
-                            }
-                            _ => {},
-                        }
-                    } else {
-                        handler(&buf[1..len])?;
                     }
                 }
-
-            });
+            })
         };
 
         Ok(BridgeClient {
             baddr: udp.local_addr()?,
             udp,
             saddr,
-            runtimes: [pack_sender, pack_receiver],
-            alive: AtomicBool::new(true),
+            runtimes: [pack_sender],
+            name,
+            alive,
         })
     }
 
-    pub async fn recv_from(&self, b: &mut [u8]) -> IResult<(usize, SocketAddr)> {
-        unimplemented!();
+    #[must_use]
+    pub async fn recv_from(&self, buf: &mut [u8]) -> IResult<(usize, SocketAddr)> {
+        if !self.is_alive() {
+            return Err(anyhow::anyhow!("The bridge has broken"));
+        }
+
+        loop {
+            let (len, raddr) = tokio::select! {
+                result=self.udp.recv_from(buf)=>{
+                    match result {
+                        Ok(n) => n,
+                        Err(err) => {
+                            println!("`{}` read error: {}. Ignored.", self.name, err);
+                            continue;
+                        }
+                    }
+                },
+
+                err=>async{
+                    loop{
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        if !self.is_alive(){
+                            return Err(anyhow::anyhow!("The bridge has broken"));
+                        }
+                    }
+                }=>{
+                    return err;
+                }
+            };
+
+            if raddr == self.saddr {
+                match buf[0] {
+                    CommunicatePacket::DATA => {
+                        println!("RECV {:?}", &buf[1..len]);
+                        buf.copy_within(1.., 0);
+                        break Ok((len - 1, raddr));
+                    }
+
+                    CommunicatePacket::CLOSE => {
+                        println!("CLOSE");
+                        self.alive.store(false, Ordering::Relaxed);
+                        break Err(anyhow::anyhow!("The bridge has broken"));
+                    }
+
+                    _ => continue,
+                }
+            } else {
+                break Ok((len, raddr));
+            }
+        }
     }
 
     pub async fn send_to(&self, b: &[u8], d: &SocketAddr) -> IResult<()> {
-        if !self.alive() {
-            return Err(anyhow::anyhow!("The Arc has been dropped"));
+        if !self.is_alive() {
+            return Err(anyhow::anyhow!("The bridge has broken"));
         }
 
-        self.udp.send_to(b, d).await?;
+        if *d == self.saddr {
+            let mut buf = [CommunicatePacket::DATA; 1500];
+            (&mut buf[1..]).write(b).unwrap();
+            self.udp.send_to(&buf[..b.len() + 1], &d).await?;
+        } else {
+            self.udp.send_to(b, d).await?;
+        }
+
         println!("SEND");
         Ok(())
     }
 
-    pub fn alive(&self) -> bool {
+    #[inline]
+    pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
     }
 
@@ -294,7 +326,7 @@ impl BridgeClient {
 
 impl Drop for BridgeClient {
     fn drop(&mut self) {
-        for x in self.runtimes.iter_mut() {
+        for x in self.runtimes.iter() {
             x.abort();
         }
     }

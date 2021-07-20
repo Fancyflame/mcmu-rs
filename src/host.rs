@@ -57,30 +57,28 @@ impl Host {
                                         //信息管道
                                         let _info=tokio::spawn(log_i_result("房主信息管道", async move{
 
-                                            let info_pipe=BridgeClient::connect(cid1, saddr.clone(), SocketAddr::new([0,0,0,0].into(), 0), "房主信息管道").await?;
+                                            let info_pipe=BridgeClient::connect(
+                                                cid1,
+                                                saddr.clone(),
+                                                SocketAddr::new([0,0,0,0].into(), 0),
+                                                "房主信息管道",
+                                            ).await?;
+
                                             let laddr=SocketAddr::new([127,0,0,1].into(), 19132);
                                             let mut buf=[0u8;1500];
-                                            buf[0]=CommunicatePacket::DATA;
 
-                                            loop{
+                                            /*loop{
                                                 tokio::time::sleep(Duration::from_millis(1500)).await;
                                                 info_pipe.send_to(b"\x02hello",&saddr).await?;
-                                            }
+                                            }*/
 
                                             loop{
-                                                let (len,raddr)=match info_pipe.recv_from(&mut buf[1..]).await{
-                                                    Ok(s)=>s,
-                                                    Err(_)=>{
-                                                        tokio::time::sleep(Duration::from_millis(100)).await;
-                                                        continue;
-                                                    }
-                                                };
-
+                                                let (len,raddr)=info_pipe.recv_from(&mut buf).await?;
                                                 if raddr==laddr{
                                                     //从本地发来
                                                     if tx_option.is_some(){
                                                         //还没有发送过端口号
-                                                        let info = match MCPEInfo::deserialize(&buf[1..len+1]) {
+                                                        let info = match MCPEInfo::deserialize(&buf) {
                                                             Some(v) => v,
                                                             None => {
                                                                 println_lined!("The protocol is malformed");
@@ -91,10 +89,10 @@ impl Host {
                                                             .unwrap()
                                                             .send(info.game_port).unwrap();
                                                     }
-                                                    info_pipe.send_to(&buf[..len+1],&saddr).await?;
+                                                    info_pipe.send_to(&buf[..len],&saddr).await?;
                                                 }else if raddr==saddr{
                                                     //从远程玩家发来
-                                                    info_pipe.send_to(&buf[2..len+1],&laddr).await?;
+                                                    info_pipe.send_to(&buf[..len],&laddr).await?;
                                                 }else{
                                                     println_lined!("Received a packet from unknown remote address: {}. Ignored.",raddr);
                                                 }
@@ -107,28 +105,37 @@ impl Host {
                                         //游戏管道
                                         let game=tokio::spawn(log_i_result("房主游戏管道",async move{
 
-                                            let game_pipe=BridgeClient::connect(cid2, saddr.clone(), SocketAddr::new([0,0,0,0].into(), 0), "房主游戏管道").await?;
-                                            let laddr=SocketAddr::new([127,0,0,1].into(), rx.await?);
                                             let mut buf=[0u8;1500];
-                                            buf[0]=CommunicatePacket::DATA;
+                                            let game_pipe=BridgeClient::connect(cid2, saddr.clone(), SocketAddr::new([0,0,0,0].into(), 0), "房主游戏管道").await?;
+                                            let laddr=tokio::select!{
+                                                result=rx=>{
+                                                    SocketAddr::new([127,0,0,1].into(), result?)
+                                                },
+
+                                                result=async {
+                                                    loop{ game_pipe.recv_from(&mut buf).await?; }
+                                                }=>{
+                                                    let _:IResult<()>=result;
+                                                    return Err(anyhow::anyhow!("Pipe broken before got enough information"));
+                                                }
+                                            };
 
                                             loop{
-                                                let (len,raddr)=game_pipe.recv_from(&mut buf[1..]).await?;
+                                                let (len,raddr)=game_pipe.recv_from(&mut buf).await?;
                                                 if raddr==laddr{
                                                     //从本地发来
-                                                    game_pipe.send_to(&buf[..len+1],&saddr).await?;
+                                                    game_pipe.send_to(&buf[..len],&saddr).await?;
                                                 }else if raddr==saddr{
                                                     //从远程玩家发来
-                                                    game_pipe.send_to(&buf[2..len+1],&laddr).await?;
+                                                    game_pipe.send_to(&buf[..len],&laddr).await?;
                                                 }
                                             }
                                         }));
 
-                                        game.await;
-                                        //dbg!(tokio::try_join!(game));
+                                        dbg!(game.await);
+
                                         println!("游戏管道断开。玩家退出房间。");
                                     });
-
 
                                 }
 
