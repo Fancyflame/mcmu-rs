@@ -138,7 +138,7 @@ impl BridgeClient {
         handler: F,
     ) -> IResult<Self>
     where
-        F: FnMut(&[u8]) -> IResult<()>,
+        F: FnMut(&[u8],SocketAddr) -> IResult<()>,
     {
         let udp = Arc::new(UdpSocket::bind(baddr).await?);
         let packet = {
@@ -194,6 +194,7 @@ impl BridgeClient {
 
         println!("`{}`连接成功", name);
 
+
         //启动心跳包运行时和垃圾清理运行时
         let pack_sender: JoinHandle<IResult<()>> = {
             let udp = udp.clone();
@@ -208,10 +209,40 @@ impl BridgeClient {
             })
         };
 
-        //监听数据写进缓冲区
+
+        //TODO 改为函数式，增添&mut [u8]数组储存
+        //处理数据
         let pack_receiver: JoinHandle<IResult<()>> = {
             let udp = udp.clone();
-            tokio::spawn(async move { loop {} })
+            let mut buf=[0u8;1500];
+            tokio::spawn(async move {
+                loop {
+                    let (len,raddr)=match udp.recv_from(&mut buf).await{
+                        Ok(n)=>n,
+                        Err(err)=>{
+                            println!("`{}` read error: {}. Ignored.",);
+                            continue;
+                        }
+                    };
+
+                    if raddr == self.saddr {
+                        match b[0] {
+                            CommunicatePacket::DATA => {
+                                println!("RECV {:?}", &b[1..bundle.0]);
+                                handler(&buf[1..len])?;
+                            }
+                            CommunicatePacket::CLOSE => {
+                                self.alive.store(false, Ordering::Relaxed);
+                                break Err(anyhow::anyhow!("The Arc has been dropped"));
+                            }
+                            _ => {},
+                        }
+                    } else {
+                        handler(&buf[1..len])?;
+                    }
+                }
+
+            });
         };
 
         Ok(BridgeClient {
@@ -224,28 +255,7 @@ impl BridgeClient {
     }
 
     pub async fn recv_from(&self, b: &mut [u8]) -> IResult<(usize, SocketAddr)> {
-        if !self.alive() {
-            return Err(anyhow::anyhow!("The Arc has been dropped"));
-        }
-
-        loop {
-            let bundle = self.udp.recv_from(b).await?;
-            if bundle.1 == self.saddr {
-                match b[0] {
-                    CommunicatePacket::DATA => {
-                        println!("RECV {:?}", &b[1..bundle.0]);
-                        break Ok(bundle);
-                    }
-                    CommunicatePacket::CLOSE => {
-                        self.alive.store(false, Ordering::Relaxed);
-                        break Err(anyhow::anyhow!("The Arc has been dropped"));
-                    }
-                    _ => continue,
-                }
-            } else {
-                break Ok(bundle);
-            }
-        }
+        unimplemented!();
     }
 
     pub async fn send_to(&self, b: &[u8], d: &SocketAddr) -> IResult<()> {
