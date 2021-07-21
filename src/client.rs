@@ -1,6 +1,9 @@
 use crate::println_lined;
 use crate::public::*;
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -11,12 +14,14 @@ pub struct Client;
 
 impl Client {
     pub async fn run(saddr: SocketAddr, cid: Identity) -> IResult<()> {
+        println!(
+            "因为Minecraft本身限制，需要于Minecraft服务器列表中添加\
+            一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138，\
+            仅添加，不需要点击进入。\n"
+        );
         #[cfg(target_os = "windows")]
         println!(
-            "您正处于Windows环境，因为其限制，需要于Minecraft服务器列表中添加\
-            一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138\
-            仅添加即可，不需要点击进入。\n\
-            **另外请注意，Windows暂时不能开服（当然我们不阻止您尝试，如果有办法\
+            "**另外Windows用户请注意，Windows暂时不能开服（当然我们不阻止您尝试，如果有办法\
             解决请告诉我们！）**\n"
         );
         let mut tcp = TcpStream::connect(saddr.clone()).await?;
@@ -102,7 +107,7 @@ impl Client {
                                 if cfg!(target_os = "windows") {
                                     19138
                                 } else {
-                                    19132
+                                    19138 //安卓也需要添加服务器列表了
                                 },
                             ),
                             "客户端信息管道",
@@ -160,7 +165,10 @@ impl Client {
                                             ).unwrap();
                                         }
 
-                                        b1.send_to(&cache_load, laddr).await?;
+                                        for _ in 0..10 {
+                                            b1.send_to(&cache_load, laddr).await?;
+                                            tokio::time::sleep(Duration::from_millis(700)).await;
+                                        }
                                     }
                                 }
                             }
@@ -170,7 +178,6 @@ impl Client {
                 };
 
                 drop(game_pipe.await);
-                _info_pipe.await;
             }
 
             Some(Operate::OperationFailed) => {

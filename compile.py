@@ -4,7 +4,8 @@ import shutil
 
 def dothis(arch, shortname, suffix=""):
     print(os.system("cargo b --release --target=" + arch))
-    os.mkdir("executable/" + shortname)
+    if not os.path.exists("executable/"+shortname):
+        os.mkdir("executable/" + shortname)
     shutil.copy(
         "target/" + arch + "/release/mcmu" + suffix,
         "executable/" + shortname + "/mcmu" + suffix,

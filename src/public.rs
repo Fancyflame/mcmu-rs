@@ -101,7 +101,7 @@ impl<'a> MCPEInfo<'a> {
         }
 
         let world_name = String::from_utf8_lossy(&sp[1]).to_string();
-        let game_port = String::from_utf8_lossy(&sp[4]).parse().unwrap_or(0);
+        let game_port = String::from_utf8_lossy(&sp[3]).parse().unwrap_or(0);
 
         return Some(MCPEInfo {
             splits: sp,
@@ -116,7 +116,7 @@ impl<'a> MCPEInfo<'a> {
 
         slices[1] = self.world_name.as_bytes();
         let game_port1 = self.game_port.to_string();
-        let game_port2 = self.game_port.to_string();
+        let game_port2 = (self.game_port + 1).to_string();
         slices[3] = game_port1.as_bytes();
         slices[4] = game_port2.as_bytes();
 
