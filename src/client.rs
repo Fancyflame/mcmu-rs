@@ -36,7 +36,7 @@ impl Client {
                 }
 
                 //游戏管道
-                let game_pipe: JoinHandle<IResult<()>> = {
+                let game_pipe = {
                     let saddr = saddr.clone();
                     tokio::spawn(log_i_result("游戏管道", async move {
                         let b2 = BridgeClient::connect(
@@ -66,7 +66,7 @@ impl Client {
                             let saddr = b2.saddr();
                             match mc_addr {
                                 None => {
-                                    if raddr.ip() != saddr.ip() {
+                                    if raddr.ip() == *LOCALHOST {
                                         mc_addr = Some(raddr);
                                         b2.send_to(&buf[..len], saddr).await?;
                                     }
@@ -151,7 +151,7 @@ impl Client {
                                             cache_check = data.to_owned();
                                             cache_load = info.serialize();
                                         }
-                                        println!("{}", String::from_utf8_lossy(data));
+                                        println_lined!("{}", String::from_utf8_lossy(&cache_load));
                                         lazy_static! {
                                             static ref STREAM:Vec<u8>=hex::decode(
                                                 "1c0000000000d1fe2180f5403287a99bb200ffff00fefefefefdfdfdfd12345678005d4d4350453b46616e6379466c616d65583b3435363b312e31372e32302e32323b313b383b31333738363935373235393131343130313130353be68891e79a84e4b896e7958c3b43726561746976653b313b35343339323b35343339333b"
@@ -167,7 +167,7 @@ impl Client {
                     }))
                 };
 
-                dbg!(game_pipe.await);
+                drop(game_pipe.await);
             }
 
             Some(Operate::OperationFailed) => {

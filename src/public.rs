@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::UdpSocket, sync::broadcast, task::JoinHandle};
+use tokio::{net::UdpSocket, task::JoinHandle};
 //use crate::ring_buffer;
 
 pub type Identity = u32;
@@ -37,6 +37,7 @@ pub enum Operate {
 
 pub struct CommunicatePacket;
 
+#[derive(Debug)]
 pub struct MCPEInfo<'a> {
     splits: Vec<&'a [u8]>,
     pub world_name: String,
@@ -81,18 +82,13 @@ impl Operate {
 impl<'a> MCPEInfo<'a> {
     pub fn deserialize(input: &'a [u8]) -> Option<Self> {
         let mut counts = 0usize;
-        const SPLIT_INDEX: [usize; 5] = [6, 7, 9, 10, 11]; //切割位点
+        const SPLIT_INDEX: [usize; 5] = [7, 8, 10, 11, 12]; //切割位点
 
         let sp: Vec<&'a [u8]> = input
             .splitn(6, |code| {
                 if *code == b';' {
-                    if SPLIT_INDEX.contains(&counts) {
-                        counts += 1;
-                        return true;
-                    } else {
-                        counts += 1;
-                        return false;
-                    }
+                    counts += 1;
+                    return SPLIT_INDEX.contains(&counts);
                 } else {
                     return false;
                 }
@@ -105,7 +101,7 @@ impl<'a> MCPEInfo<'a> {
         }
 
         let world_name = String::from_utf8_lossy(&sp[1]).to_string();
-        let game_port = String::from_utf8_lossy(&sp[5]).parse().unwrap_or(0);
+        let game_port = String::from_utf8_lossy(&sp[4]).parse().unwrap_or(0);
 
         return Some(MCPEInfo {
             splits: sp,
@@ -119,7 +115,7 @@ impl<'a> MCPEInfo<'a> {
         slices.extend_from_slice(&self.splits);
 
         slices[1] = self.world_name.as_bytes();
-        let game_port1 = (self.game_port - 1).to_string();
+        let game_port1 = self.game_port.to_string();
         let game_port2 = self.game_port.to_string();
         slices[3] = game_port1.as_bytes();
         slices[4] = game_port2.as_bytes();
@@ -248,7 +244,7 @@ impl BridgeClient {
                     }
                 },
 
-                err=>async{
+                err=async{
                     loop{
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         if !self.is_alive(){
@@ -263,7 +259,8 @@ impl BridgeClient {
             if raddr == self.saddr {
                 match buf[0] {
                     CommunicatePacket::DATA => {
-                        println!("RECV {:?}", &buf[1..len]);
+                        //println!("RECV {:?}", &buf[1..len]);
+                        println!("RECV");
                         buf.copy_within(1.., 0);
                         break Ok((len - 1, raddr));
                     }
@@ -332,7 +329,7 @@ impl Drop for BridgeClient {
     }
 }
 
-pub async fn log_i_result<F>(name: &str, future: F) -> IResult<()>
+pub async fn log_i_result<F>(name: &str, future: F)
 where
     F: std::future::Future<Output = IResult<()>>,
 {
@@ -340,5 +337,4 @@ where
     if let Err(ref err) = result {
         println!("`{}`已断开。因为：{}", name, err);
     }
-    result
 }

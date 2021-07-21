@@ -15,8 +15,8 @@ mod server;
 #[tokio::main]
 async fn main() {
     let srv = SocketAddr::new(
-        //[39, 108, 179, 179].into(),
-        [127, 0, 0, 1].into(),
+        [39, 108, 179, 179].into(),
+        //[127, 0, 0, 1].into(),
         27979,
     );
     let matches = clap_app!(
@@ -62,24 +62,34 @@ async fn main() {
             host::Host::run(srv).await
         }
 
-        ("j", Some(subm)) => match subm
-            .value_of("ROOM_NUM")
-            .unwrap()
-            .parse::<public::Identity2>()
-        {
-            Ok(num) => {
-                println!("测试版，服务器地址已自动填入");
-                client::Client::run(srv, num).await
-            }
-            _ => {
-                println!("输入的房间号无效");
+        ("j", Some(subm)) => {
+            let room = subm.value_of("ROOM_NUM").unwrap();
+            if room.len() != 6 {
+                println!("请向房主询问并输入6位数字房间号");
                 Ok(())
+            } else {
+                match room.parse::<public::Identity2>() {
+                    Ok(num) => {
+                        println!("测试版，服务器地址已自动填入");
+                        client::Client::run(srv, num).await
+                    }
+                    _ => {
+                        println!("输入的房间号无效");
+                        Ok(())
+                    }
+                }
             }
-        },
+        }
 
         ("t", Some(_)) => {
             println!("测试版，服务器地址已自动填入");
-            println!("无测试可用");
+            let data=hex::decode("1c0000000000d1fe2180f5403287a99bb200ffff00fefefefefdfdfdfd12345678005d4d4350453b46616e6379466c616d65583b3435363b312e31372e32302e32323b313b383b31333738363935373235393131343130313130353be68891e79a84e4b896e7958c3b43726561746976653b313b35343339323b35343339333b")
+                .unwrap();
+            let info = public::MCPEInfo::deserialize(&data).unwrap();
+            println!(
+                "房间名称：{}。游戏端口：{}",
+                info.world_name, info.game_port
+            );
             Ok(())
         }
 

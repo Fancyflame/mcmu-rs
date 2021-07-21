@@ -1,14 +1,10 @@
 use crate::println_lined;
 use crate::public::*;
-use std::{
-    net::SocketAddr,
-    sync::{atomic::AtomicU16, Arc},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{oneshot, Mutex},
+    sync::oneshot,
     task::JoinHandle,
     time,
 };
@@ -25,12 +21,12 @@ impl Host {
         match Operate::deserialize(&buf[..len]){
 
 
-            Some(Operate::OperationFailed)=>Err(anyhow::anyhow!("The server rejected our request")),
+            Some(Operate::OperationFailed)=>Err(anyhow::anyhow!("服务器拒绝创建房间，可能您被禁止创建房间或者服务器已满")),
 
 
             Some(Operate::Opened(room_id))=>{
 
-                println!("连接成功。房间号{:07}",room_id);
+                println!("连接成功。房间号{:06}",room_id);
                 let mut interval=time::interval(Duration::from_secs(10));
                 loop{
 
@@ -85,6 +81,7 @@ impl Host {
                                                                 continue;
                                                             }
                                                         };
+                                                        assert_ne!(info.game_port,0);
                                                         std::mem::replace(&mut tx_option, None)
                                                             .unwrap()
                                                             .send(info.game_port).unwrap();
@@ -132,7 +129,7 @@ impl Host {
                                             }
                                         }));
 
-                                        dbg!(game.await);
+                                        drop(game.await);
 
                                         println!("游戏管道断开。玩家退出房间。");
                                     });
