@@ -15,5 +15,8 @@ def dothis(arch, shortname, suffix=""):
 dothis("aarch64-unknown-linux-musl", "arm64-linux")
 dothis("x86_64-unknown-linux-musl", "amd64-linux")
 dothis("x86_64-pc-windows-msvc", "amd64-windows", ".exe")
+dothis("aarch64-apple-ios", "arm64-ios")
+dothis("aarch64-apple-darwin", "arm64-macos")
+dothis("x86_64-apple-darwin", "amd64-macos")
 
 print("编译完成")
