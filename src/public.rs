@@ -48,7 +48,7 @@ pub struct BridgeClient {
     udp: Arc<UdpSocket>,
     saddr: SocketAddr,
     baddr: SocketAddr,
-    runtimes: [JoinHandle<IResult<()>>; 1],
+    runtimes: [JoinHandle<()>; 1],
     name: &'static str, //buffer:ring_buffer::Reader
     alive: Arc<AtomicBool>,
 }
@@ -196,7 +196,7 @@ impl BridgeClient {
         println!("`{}`连接成功", name);
 
         //启动心跳包运行时
-        let pack_sender: JoinHandle<IResult<()>> = {
+        let pack_sender = {
             let udp = udp.clone();
             let saddr = saddr.clone();
             let alive = alive.clone();
@@ -210,8 +210,10 @@ impl BridgeClient {
                         Err(err) => {
                             println_lined!("ERR: {}", err);
                             alive.store(false, Ordering::Relaxed);
+                            break;
                         }
                     }
+                    //println!("心跳");
                 }
             })
         };
@@ -259,7 +261,7 @@ impl BridgeClient {
             if raddr == self.saddr {
                 match buf[0] {
                     CommunicatePacket::DATA => {
-                        //println!("RECV {:?}", &buf[1..len]);
+                        //println!("RECV {:?}",&buf[1..len]);
                         println!("RECV");
                         buf.copy_within(1.., 0);
                         break Ok((len - 1, raddr));

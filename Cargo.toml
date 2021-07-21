@@ -13,5 +13,5 @@ hex = "0"
 lazy_static = "1"
 rand = "0"
 serde = {version = "1", features = ["derive"]}
-tokio = {version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "io-util"]}
+tokio = {version = "1.8", features = ["net", "rt-multi-thread", "macros", "time", "sync", "io-util"]}
 anyhow = "1"

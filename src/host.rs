@@ -130,6 +130,7 @@ impl Host {
                                         }));
 
                                         drop(game.await);
+                                        drop(_info.await);
 
                                         println!("游戏管道断开。玩家退出房间。");
                                     });

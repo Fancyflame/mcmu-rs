@@ -74,9 +74,11 @@ impl Client {
                                 Some(ref laddr) => {
                                     if raddr == *laddr {
                                         //从本地发来
+                                        println!("本地数据");
                                         b2.send_to(&buf[..len], saddr).await?;
                                     } else if raddr == *saddr {
                                         //从房主发来
+                                        println!("远程数据");
                                         b2.send_to(&buf[..len], laddr).await?;
                                     }
                                 }
@@ -168,6 +170,7 @@ impl Client {
                 };
 
                 drop(game_pipe.await);
+                _info_pipe.await;
             }
 
             Some(Operate::OperationFailed) => {
