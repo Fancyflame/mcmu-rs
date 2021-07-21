@@ -1,11 +1,13 @@
 # mcmu-rs
-# 此项目非完全开源，请不要外泄源码！！
+# 此项目仅对MJTG内部开源，请不要外泄源码！！
 ## MCMU
 MCMU是一个minecraft联机工具，MCMU-RS是Rust版本的MCMU。
 
 所有已编译的可执行文件在executable文件夹下。
 
 输入`./mcmu --help`来获取帮助。
+
+可以把编译后的二进制文件分享给任何人参与测试或者游玩
 
 ## 请注意
 - Windows不能开服
