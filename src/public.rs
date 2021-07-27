@@ -2,7 +2,7 @@ use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
-    net::SocketAddr,
+    net::{IpAddr,SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -21,6 +21,28 @@ macro_rules! println_lined{
     ($($tt:tt)*)=>{
         println!("[{}:{}] {}",file!(),line!(),format!($($tt)*));
     }
+}
+
+lazy_static!{
+    pub static ref LOCALADDR:IpAddr = {
+        let foo=||{
+            let udp=std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            udp.connect("8.8.8.8:80").ok()?;
+            Some(udp.local_addr().ok()?.ip())
+        };
+
+        match foo(){
+            None=>{
+                println_lined!("不能识别内网IP。");
+                IpAddr::from([127,0,0,1])
+            }
+            Some(l)=>{
+                println!("已识别内网IP：{}\n",l.to_string());
+                l
+            }
+        }
+    };
+    pub static ref LOCALHOST:IpAddr=IpAddr::from([127,0,0,1]);
 }
 
 #[derive(Serialize, Deserialize, Debug)]

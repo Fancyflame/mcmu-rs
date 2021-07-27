@@ -41,6 +41,7 @@ async fn main() {
     )
     .get_matches();
 
+    lazy_static::initialize(&public::LOCALADDR);
     let result = match matches.subcommand() {
         ("s", Some(subm)) => match subm.value_of("ADDR").unwrap().parse::<SocketAddr>() {
             Ok(SocketAddr::V6(_)) => {

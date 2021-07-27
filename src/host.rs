@@ -13,6 +13,13 @@ pub struct Host;
 
 impl Host {
     pub async fn run(saddr: SocketAddr) -> IResult<()> {
+
+        #[cfg(target_os = "windows")]
+        println!(
+            "Windows用户请注意，Windows暂时不能开服！（当然我们不阻止您尝试，如果有办法\
+            解决请告诉我们！）\n"
+        );
+
         let mut stream = TcpStream::connect(&saddr).await?;
         stream.write(&Operate::Open.serialize()).await?;
         let mut buf = [0u8; 64];
@@ -60,7 +67,7 @@ impl Host {
                                                 "房主信息管道",
                                             ).await?;
 
-                                            let laddr=SocketAddr::new([127,0,0,1].into(), 19132);
+                                            let laddr=SocketAddr::new(*LOCALADDR, 19132);
                                             let mut buf=[0u8;1500];
 
                                             /*loop{
@@ -106,7 +113,7 @@ impl Host {
                                             let game_pipe=BridgeClient::connect(cid2, saddr.clone(), SocketAddr::new([0,0,0,0].into(), 0), "房主游戏管道").await?;
                                             let laddr=tokio::select!{
                                                 result=rx=>{
-                                                    SocketAddr::new([127,0,0,1].into(), result?)
+                                                    SocketAddr::new(*LOCALADDR, result?)
                                                 },
 
                                                 result=async {

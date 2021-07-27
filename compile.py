@@ -3,7 +3,10 @@ import shutil
 
 
 def dothis(arch, shortname, suffix=""):
-    print(os.system("cargo b --release --target=" + arch))
+    exit_code=os.system("cargo b --release --target=" + arch)
+    if exit_code!=0:
+        print("编译"+arch+"失败")
+        return
     if not os.path.exists("executable/"+shortname):
         os.mkdir("executable/" + shortname)
     shutil.copy(

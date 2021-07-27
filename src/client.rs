@@ -15,14 +15,13 @@ pub struct Client;
 impl Client {
     pub async fn run(saddr: SocketAddr, cid: Identity) -> IResult<()> {
         println!(
-            "因为Minecraft本身限制，需要于Minecraft服务器列表中添加\
+            /*"局域网玩家连接法：因为Minecraft本身限制，需要于Minecraft服务器列表中添加\
             一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138，\
-            仅添加，不需要点击进入。\n"
-        );
-        #[cfg(target_os = "windows")]
-        println!(
-            "**另外Windows用户请注意，Windows暂时不能开服（当然我们不阻止您尝试，如果有办法\
-            解决请告诉我们！）**\n"
+            仅添加，不需要点击进入。适用于非Xbox的玩家。\n\n\*/
+            "局域网玩家连接法：启动mcmu，在好友列表会自动出现房间。\n\n\
+            服务器列表连接法：添加一个服务器，服务器名任意，服务器地址为127.0.0.1，端口\
+            为40010。玩家可以从服务器列表直接点击进入房间，适用于Xbox玩家。\n\n\
+            可以同时添加上述两个服务器，任意选择使用。\n\n"
         );
         let mut tcp = TcpStream::connect(saddr.clone()).await?;
         let mut tcp_buf = [0u8; 32];
@@ -36,9 +35,6 @@ impl Client {
 
                 //记录游戏管道端口，以便后期魔改
                 let (tx, rx) = tokio::sync::oneshot::channel::<u16>();
-                lazy_static! {
-                    static ref LOCALHOST: IpAddr = [127, 0, 0, 1].into();
-                }
 
                 //游戏管道
                 let game_pipe = {
@@ -47,7 +43,7 @@ impl Client {
                         let b2 = BridgeClient::connect(
                             cid2,
                             saddr,
-                            SocketAddr::new([0, 0, 0, 0].into(), 0),
+                            SocketAddr::new([0, 0, 0, 0].into(), 40010),
                             "客户端游戏管道",
                         )
                         .await?;
@@ -71,7 +67,7 @@ impl Client {
                             let saddr = b2.saddr();
                             match mc_addr {
                                 None => {
-                                    if raddr.ip() == *LOCALHOST {
+                                    if raddr.ip()==*LOCALADDR{
                                         mc_addr = Some(raddr);
                                         b2.send_to(&buf[..len], saddr).await?;
                                     }
@@ -107,7 +103,7 @@ impl Client {
                                 if cfg!(target_os = "windows") {
                                     19138
                                 } else {
-                                    19138 //安卓也需要添加服务器列表了
+                                    19132 //安卓也需要添加服务器列表了
                                 },
                             ),
                             "客户端信息管道",
@@ -133,7 +129,9 @@ impl Client {
                             match laddr_option {
                                 None => {
                                     if raddr.ip() != saddr.ip() {
-                                        laddr_option = Some(raddr);
+                                        let mut addr=raddr;
+                                        addr.set_ip(*LOCALADDR);
+                                        laddr_option = Some(addr);
                                         b1.send_to(&buf[..len], saddr).await?;
                                     }
                                 }
