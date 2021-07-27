@@ -89,9 +89,9 @@ impl Bridge {
     }
 }
 
-impl Drop for TableItem{
-    fn drop(&mut self){
-        self.should_clean.store(true,Ordering::Relaxed);
+impl Drop for TableItem {
+    fn drop(&mut self) {
+        self.should_clean.store(true, Ordering::Relaxed);
     }
 }
 
@@ -150,15 +150,20 @@ impl Server {
                                     //寻找可用的id
                                     let room_id={
                                         let mut times=0u8;
-                                        loop{
-                                            let id=rand::thread_rng().gen_range(0..1000000);
-                                            if !rooms_lock.contains_key(&id){
-                                                break id;
-                                            }
-                                            times+=1;
-                                            if times==5{
-                                                fail!();
-                                                return Ok(());
+                                        if rand::thread_rng().gen_range(0..1000)==0 && !rooms_lock.contains_key(&114514){
+                                            //有千分之一的几率触发彩蛋
+                                            114514
+                                        }else{
+                                            loop{
+                                                let id=rand::thread_rng().gen_range(0..1000000);
+                                                if !rooms_lock.contains_key(&id){
+                                                    break id;
+                                                }
+                                                times+=1;
+                                                if times==5{
+                                                    fail!();
+                                                    return Ok(());
+                                                }
                                             }
                                         }
                                     };
@@ -289,12 +294,11 @@ impl Server {
                         };
 
                         //检查是否可连接
-                        if buf[0]==CommunicatePacket::CONNECT{
+                        if buf[0] == CommunicatePacket::CONNECT {
                             let mut bridges_lock = bridges.lock().await;
-                            let cid =
-                                Identity2::from_be_bytes(buf[1..len].try_into().unwrap());
+                            let cid = Identity2::from_be_bytes(buf[1..len].try_into().unwrap());
 
-                            if let Some(bri)=bridges_lock.get_mut(&cid){
+                            if let Some(bri) = bridges_lock.get_mut(&cid) {
                                 //地址不对应
                                 if let Err(_err) = bri.upgrade(addr) {
                                     println_lined!("{:#?}", *table.read().await);
@@ -305,8 +309,7 @@ impl Server {
                                     continue;
                                 }
 
-                                let (a1, a2) =
-                                    bridges_lock.remove(&cid).unwrap().finish();
+                                let (a1, a2) = bridges_lock.remove(&cid).unwrap().finish();
 
                                 println!("正在桥接");
 
@@ -319,7 +322,7 @@ impl Server {
                                         raddr: a2.clone(),
                                         static_time: AtomicU8::new(0),
                                         should_clean: arc.clone(),
-                                    }
+                                    },
                                 );
 
                                 table_lock.insert(
@@ -328,7 +331,7 @@ impl Server {
                                         raddr: a1.clone(),
                                         static_time: AtomicU8::new(0),
                                         should_clean: arc,
-                                    }
+                                    },
                                 );
 
                                 buf[0] = CommunicatePacket::ACK;
@@ -429,12 +432,12 @@ impl Server {
             })
         };
 
-        let check_lock = || {
+        /*let check_lock = || {
             let bridges = bridges.clone();
             let table = table.clone();
             tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tokio::time::sleep(Duration::from_secs(4)).await;
                     if let Err(_err) = tokio::time::timeout(Duration::from_secs(1), async {
                         bridges.lock().await;
                         table.write().await;
@@ -446,7 +449,7 @@ impl Server {
                 }
             });
         };
-        check_lock();
+        check_lock();*/
 
         connecter.await??;
         Ok(())

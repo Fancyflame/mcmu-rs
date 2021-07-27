@@ -1,4 +1,3 @@
-use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::time::Duration;
 #[macro_use]

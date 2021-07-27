@@ -2,7 +2,7 @@ use bincode;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
-    net::{IpAddr,SocketAddr},
+    net::{IpAddr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -23,26 +23,26 @@ macro_rules! println_lined{
     }
 }
 
-lazy_static!{
-    pub static ref LOCALADDR:IpAddr = {
-        let foo=||{
-            let udp=std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+lazy_static! {
+    pub static ref LOCALADDR: IpAddr = {
+        let foo = || {
+            let udp = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
             udp.connect("8.8.8.8:80").ok()?;
             Some(udp.local_addr().ok()?.ip())
         };
 
-        match foo(){
-            None=>{
+        match foo() {
+            None => {
                 println_lined!("不能识别内网IP。");
-                IpAddr::from([127,0,0,1])
+                IpAddr::from([127, 0, 0, 1])
             }
-            Some(l)=>{
-                println!("已识别内网IP：{}\n",l.to_string());
+            Some(l) => {
+                println!("已识别内网IP：{}\n", l.to_string());
                 l
             }
         }
     };
-    pub static ref LOCALHOST:IpAddr=IpAddr::from([127,0,0,1]);
+    pub static ref LOCALHOST: IpAddr = IpAddr::from([127, 0, 0, 1]);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,10 +104,10 @@ impl Operate {
 impl<'a> MCPEInfo<'a> {
     pub fn deserialize(input: &'a [u8]) -> Option<Self> {
         let mut counts = 0usize;
-        const SPLIT_INDEX: [usize; 5] = [7, 8, 10, 11, 12]; //切割位点
+        const SPLIT_INDEX: [usize; 6] = [6, 7, 8, 10, 11, 12]; //切割位点
 
         let sp: Vec<&'a [u8]> = input
-            .splitn(6, |code| {
+            .splitn(7, |code| {
                 if *code == b';' {
                     counts += 1;
                     return SPLIT_INDEX.contains(&counts);
@@ -117,13 +117,13 @@ impl<'a> MCPEInfo<'a> {
             })
             .collect();
 
-        if sp.len() != 6 {
-            println_lined!("mcpe info deserialize error, buffer: {:?}", input);
+        if sp.len() != 7 {
+            println_lined!("Malformed packet. {:?}", input);
             return None;
         }
 
-        let world_name = String::from_utf8_lossy(&sp[1]).to_string();
-        let game_port = String::from_utf8_lossy(&sp[3]).parse().unwrap_or(0);
+        let world_name = String::from_utf8_lossy(&sp[2]).to_string();
+        let game_port = String::from_utf8_lossy(&sp[4]).parse().unwrap_or(0);
 
         return Some(MCPEInfo {
             splits: sp,
@@ -133,14 +133,17 @@ impl<'a> MCPEInfo<'a> {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let mut slices = Vec::with_capacity(6);
+        /*lazy_static!{
+            static ref FAKE_ID:
+        }*/
+        let mut slices = Vec::with_capacity(7);
         slices.extend_from_slice(&self.splits);
 
-        slices[1] = self.world_name.as_bytes();
+        slices[2] = self.world_name.as_bytes();
         let game_port1 = self.game_port.to_string();
         let game_port2 = (self.game_port + 1).to_string();
-        slices[3] = game_port1.as_bytes();
-        slices[4] = game_port2.as_bytes();
+        slices[4] = game_port1.as_bytes();
+        slices[5] = game_port2.as_bytes();
 
         return slices.join(&b";"[..]);
     }

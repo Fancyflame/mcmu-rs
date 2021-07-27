@@ -13,7 +13,6 @@ pub struct Host;
 
 impl Host {
     pub async fn run(saddr: SocketAddr) -> IResult<()> {
-
         #[cfg(target_os = "windows")]
         println!(
             "Windows用户请注意，Windows暂时不能开服！（当然我们不阻止您尝试，如果有办法\
@@ -81,7 +80,7 @@ impl Host {
                                                     //从本地发来
                                                     if tx_option.is_some(){
                                                         //还没有发送过端口号
-                                                        let info = match MCPEInfo::deserialize(&buf) {
+                                                        let info = match MCPEInfo::deserialize(&buf[..len]) {
                                                             Some(v) => v,
                                                             None => {
                                                                 println_lined!("The protocol is malformed");

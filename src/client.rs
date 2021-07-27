@@ -17,8 +17,7 @@ impl Client {
         println!(
             /*"局域网玩家连接法：因为Minecraft本身限制，需要于Minecraft服务器列表中添加\
             一个服务器，服务器名任意，服务器地址为127.0.0.1，端口为19138，\
-            仅添加，不需要点击进入。适用于非Xbox的玩家。\n\n\*/
-            "局域网玩家连接法：启动mcmu，在好友列表会自动出现房间。\n\n\
+            仅添加，不需要点击进入。适用于非Xbox的玩家。\n\n\*/ "局域网玩家连接法：启动mcmu，在好友列表会自动出现房间。\n\n\
             服务器列表连接法：添加一个服务器，服务器名任意，服务器地址为127.0.0.1，端口\
             为40010。玩家可以从服务器列表直接点击进入房间，适用于Xbox玩家。\n\n\
             可以同时添加上述两个服务器，任意选择使用。\n\n"
@@ -67,7 +66,7 @@ impl Client {
                             let saddr = b2.saddr();
                             match mc_addr {
                                 None => {
-                                    if raddr.ip()==*LOCALADDR{
+                                    if raddr.ip() == *LOCALADDR {
                                         mc_addr = Some(raddr);
                                         b2.send_to(&buf[..len], saddr).await?;
                                     }
@@ -101,7 +100,7 @@ impl Client {
                             SocketAddr::new(
                                 [0, 0, 0, 0].into(),
                                 if cfg!(target_os = "windows") {
-                                    19138
+                                    19132
                                 } else {
                                     19132 //安卓也需要添加服务器列表了
                                 },
@@ -129,7 +128,7 @@ impl Client {
                             match laddr_option {
                                 None => {
                                     if raddr.ip() != saddr.ip() {
-                                        let mut addr=raddr;
+                                        let mut addr = raddr;
                                         addr.set_ip(*LOCALADDR);
                                         laddr_option = Some(addr);
                                         b1.send_to(&buf[..len], saddr).await?;
@@ -163,9 +162,9 @@ impl Client {
                                             ).unwrap();
                                         }
 
-                                        for _ in 0..10 {
+                                        for _ in 0..3 {
                                             b1.send_to(&cache_load, laddr).await?;
-                                            tokio::time::sleep(Duration::from_millis(700)).await;
+                                            tokio::time::sleep(Duration::from_millis(500)).await;
                                         }
                                     }
                                 }
