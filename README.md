@@ -1,5 +1,3 @@
-# mcmu-rs
-# 此项目仅对MJTG内部开源，请不要外泄源码！！
 ## MCMU
 MCMU是一个minecraft联机工具，MCMU-RS是Rust版本的MCMU。
 
